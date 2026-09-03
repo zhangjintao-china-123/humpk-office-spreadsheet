@@ -1,0 +1,229 @@
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+}
+
+.ho-sheet-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #ececec;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+}
+
+.ho-sheet-workspace {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #f0f0f0;
+  outline: none;
+}
+
+.ho-sheet-scroll {
+  position: absolute;
+  inset: 0 15px 15px 0;
+  z-index: 1;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.ho-sheet-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.ho-sheet-vbar,
+.ho-sheet-hbar,
+.ho-sheet-bar-corner {
+  position: absolute;
+  z-index: 5;
+  background: #f0f0f0;
+}
+
+.ho-sheet-vbar {
+  top: 0;
+  right: 0;
+  bottom: 15px;
+  width: 15px;
+  border-left: 1px solid #d0d0d0;
+}
+
+.ho-sheet-hbar {
+  left: 0;
+  right: 15px;
+  bottom: 0;
+  height: 15px;
+  border-top: 1px solid #d0d0d0;
+}
+
+.ho-sheet-bar-corner {
+  right: 0;
+  bottom: 0;
+  width: 15px;
+  height: 15px;
+  border-top: 1px solid #d0d0d0;
+  border-left: 1px solid #d0d0d0;
+}
+
+.ho-sheet-vbar-thumb,
+.ho-sheet-hbar-thumb {
+  position: absolute;
+  background: #8a8a8a;
+  border-radius: 4px;
+}
+
+.ho-sheet-vbar-thumb {
+  left: 2px;
+  width: 11px;
+}
+
+.ho-sheet-hbar-thumb {
+  top: 2px;
+  height: 11px;
+}
+
+.ho-sheet-vbar-thumb:hover,
+.ho-sheet-hbar-thumb:hover {
+  background: #6e6e6e;
+}
+
+.ho-sheet-workspace.is-paintformat,
+.ho-sheet-workspace.is-paintformat .ho-sheet-scroll {
+  cursor: copy;
+}
+
+.ho-sheet-sizer {
+  pointer-events: none;
+}
+
+.ho-sheet-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  pointer-events: none;
+}
+
+.ho-sheet-editor {
+  position: absolute;
+  z-index: 3;
+  display: none;
+  margin: 0;
+  padding: 2px 4px;
+  border: 2px solid #2e73c1;
+  outline: none;
+  resize: none;
+  font: 13px Arial;
+  line-height: 1.2;
+  background: #fff;
+}
+
+.ho-sheet-editor.is-on {
+  display: block;
+}
+
+.ho-sheet-capture {
+  position: absolute;
+  z-index: 2;
+  margin: 0;
+  padding: 0;
+  width: 0;
+  height: 0;
+  border: none;
+  outline: none;
+  overflow: hidden;
+  opacity: 0;
+  background: transparent;
+  font: 13px Arial;
+  line-height: 1.2;
+  pointer-events: none;
+  color: transparent;
+  caret-color: transparent;
+}
+
+.ho-sheet-capture.is-ime {
+  padding: 2px 4px;
+  opacity: 1;
+  background: #fff;
+  color: #111;
+  caret-color: #111;
+  overflow: visible;
+}
+
+.ho-sheet-workspace.is-editing .ho-sheet-capture {
+  display: none;
+}
+
+.ho-sheet-formulabar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  background: #fff;
+  border-bottom: 1px solid #d0d0d0;
+  flex-shrink: 0;
+}
+
+.ho-sheet-addr {
+  width: 72px;
+  height: 20px;
+  border: 1px solid #c6c6c6;
+  text-align: center;
+  font-size: 12px;
+}
+
+.ho-sheet-fx {
+  font-size: 12px;
+  font-style: italic;
+  color: #666;
+  cursor: pointer;
+}
+
+.ho-sheet-fx-input {
+  flex: 1;
+  height: 20px;
+  border: 1px solid #c6c6c6;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.ho-sheet-tabs {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 8px;
+  background: #f3f3f3;
+  border-top: 1px solid #d0d0d0;
+  flex-shrink: 0;
+}
+
+.ho-sheet-tab-list {
+  display: flex;
+  gap: 2px;
+  overflow: auto;
+}
+
+.ho-sheet-tab,
+.ho-sheet-tab-add {
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 12px;
+}
+
+.ho-sheet-tab.is-on {
+  background: #fff;
+  border-color: #c6c6c6;
+  border-bottom-color: #fff;
+}
+
+.ho-sheet-tab-add {
+  font-size: 16px;
+  line-height: 18px;
+}

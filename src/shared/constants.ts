@@ -1,0 +1,25 @@
+export const DEFAULT_ROW_LEN = 100;
+export const DEFAULT_COL_LEN = 26;
+export const DEFAULT_ROW_HEIGHT = 20;
+export const DEFAULT_COL_WIDTH = 68;
+export const INDEX_WIDTH = 46;
+export const HEADER_HEIGHT = 20;
+export const SCROLLBAR_SIZE = 15;
+export const MIN_COL_WIDTH = 24;
+export const MIN_ROW_HEIGHT = 16;
+export const CELL_PAD = 3;
+export const RESIZE_HIT = 4;
+export const FILTER_HIT = 20;
+export const PT_TO_PX = 96 / 72;
+export const MIN_IMAGE_SIZE = 16;
+export const DEFAULT_IMAGE_MAX = 240;
+
+export const GRID_COLOR = "#e0e0e0";
+export const HEADER_BG = "#f5f5f5";
+export const HEADER_BORDER = "#d0d0d0";
+export const HEADER_TEXT = "#555555";
+export const SELECTION_FILL = "rgba(46, 115, 193, 0.12)";
+export const SELECTION_STROKE = "#2e73c1";
+export const CLIPBOARD_DASH = [5, 3] as const;
+export const HEADER_ACTIVE_BG = "#d6e6f8";
+export const FREEZE_LINE = "rgba(75, 137, 255, 0.6)";

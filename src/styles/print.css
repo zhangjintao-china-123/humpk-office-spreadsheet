@@ -1,0 +1,105 @@
+.ho-sheet-print {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: #5f5f5f;
+  color: #222;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+}
+
+.ho-sheet-print[hidden] {
+  display: none;
+}
+
+.ho-sheet-print-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 44px;
+  padding: 0 16px;
+  background: #217346;
+  color: #fff;
+}
+
+.ho-sheet-print-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ho-sheet-print-count {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.ho-sheet-print-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.ho-sheet-print-actions button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+}
+
+.ho-sheet-print-actions button.is-primary {
+  background: #fff;
+  color: #217346;
+  border-color: #fff;
+}
+
+.ho-sheet-print-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+}
+
+.ho-sheet-print-pages {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+}
+
+.ho-sheet-print-card {
+  width: max-content;
+  margin: 0 auto 24px;
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
+}
+
+.ho-sheet-print-card canvas {
+  display: block;
+}
+
+.ho-sheet-print-sider {
+  width: 260px;
+  flex-shrink: 0;
+  padding: 16px;
+  background: #f3f3f3;
+  border-left: 1px solid #c6c6c6;
+  overflow: auto;
+}
+
+.ho-sheet-print-sider label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: #444;
+}
+
+.ho-sheet-print-sider select,
+.ho-sheet-print-sider input {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #c6c6c6;
+  background: #fff;
+  font-size: 12px;
+}

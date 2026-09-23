@@ -1,5 +1,6 @@
 import { expandFilterRange, type AutoFilterJson } from "../model/AutoFilter";
-import { cellDisplay } from "../model/Cell";
+import { cellDisplay, cellNoteText } from "../model/Cell";
+import { isEmptyMark } from "../model/CellMarks";
 import type { CellRange } from "../model/CellRange";
 import type { EditCommand } from "./EditCommand";
 import type { EditHost } from "./EditHost";
@@ -16,13 +17,29 @@ export class ToggleAutoFilterCommand implements EditCommand {
     const sheet = this.host.sheet();
     this.before = sheet.captureFilter();
     if (sheet.autoFilter.active()) {
-      sheet.autoFilter.clear();
+      const was = sheet.autoFilter.range().clone();
+      sheet.alignAutoFilterHeader();
+      if (sheet.autoFilter.range().equals(was)) {
+        sheet.autoFilter.clear();
+      }
     } else {
       const expanded = expandFilterRange(
         this.range,
         sheet.rows.len,
         sheet.cols.len,
-        (ri, ci) => cellDisplay(sheet.getCell(ri, ci)),
+        (ri, ci) => {
+          if (cellDisplay(sheet.getCell(ri, ci), sheet.getCellStyle(ri, ci))) {
+            return true;
+          }
+          if (cellNoteText(sheet.getCell(ri, ci))) {
+            return true;
+          }
+          if (sheet.getCellVerdict(ri, ci) !== "none") {
+            return true;
+          }
+          return !isEmptyMark(sheet.getCellMark(ri, ci));
+        },
+        (ri, ci) => sheet.merges.getFirstIncludes(ri, ci),
       );
       sheet.autoFilter.ref = expanded.toString();
       sheet.autoFilter.filters = [];

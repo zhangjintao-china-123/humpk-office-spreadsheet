@@ -3,11 +3,14 @@ import type { EditCommand } from "./EditCommand";
 export class History {
   private undoStack: EditCommand[] = [];
   private redoStack: EditCommand[] = [];
+  onPersist?: () => void;
+  onStackChange?: () => void;
 
   do(command: EditCommand): void {
     command.do();
     this.undoStack.push(command);
     this.redoStack = [];
+    this.onStackChange?.();
   }
 
   undo(): boolean {
@@ -17,6 +20,7 @@ export class History {
     }
     command.undo();
     this.redoStack.push(command);
+    this.notifyPersist(command);
     return true;
   }
 
@@ -27,7 +31,14 @@ export class History {
     }
     command.do();
     this.undoStack.push(command);
+    this.notifyPersist(command);
     return true;
+  }
+
+  private notifyPersist(command: EditCommand): void {
+    if (command.persistOnHistory) {
+      this.onPersist?.();
+    }
   }
 
   clear(): void {

@@ -1,5 +1,5 @@
 import { cloneCell, type Cell } from "../model/Cell";
-import type { CellRange } from "../model/CellRange";
+import { CellRange } from "../model/CellRange";
 import type { Sheet } from "../model/Sheet";
 
 export interface ClipPayload {
@@ -12,16 +12,21 @@ export interface ClipPayload {
 export class Clipboard {
   payload: ClipPayload | null = null;
 
-  copy(sheet: Sheet, range: CellRange, mode: "copy" | "cut" = "copy"): ClipPayload {
+  copy(sheet: Sheet, range: CellRange | CellRange[], mode: "copy" | "cut" = "copy"): ClipPayload {
+    const ranges = Array.isArray(range) ? range : [range];
+    const box = ranges.length === 0
+      ? CellRange.cell(0, 0)
+      : ranges.reduce((acc, item) => acc.union(item));
     const cells: Array<Array<Cell | undefined>> = [];
-    for (let ri = range.sri; ri <= range.eri; ri += 1) {
+    for (let ri = box.sri; ri <= box.eri; ri += 1) {
       const row: Array<Cell | undefined> = [];
-      for (let ci = range.sci; ci <= range.eci; ci += 1) {
-        row.push(cloneCell(sheet.getCell(ri, ci)));
+      for (let ci = box.sci; ci <= box.eci; ci += 1) {
+        const selected = ranges.some((item) => item.includes(ri, ci));
+        row.push(selected ? cloneCell(sheet.getCell(ri, ci)) : undefined);
       }
       cells.push(row);
     }
-    this.payload = { mode, sheet, range: range.clone(), cells };
+    this.payload = { mode, sheet, range: box.clone(), cells };
     return this.payload;
   }
 

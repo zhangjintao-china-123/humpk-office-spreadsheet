@@ -1,12 +1,17 @@
 import { FormulaBar } from "./ui/formulabar/FormulaBar";
 import { Ribbon } from "./ui/ribbon/Ribbon";
 import { SheetTabs } from "./ui/sheettabs/SheetTabs";
+import { StatusBar } from "./ui/statusbar/StatusBar";
 import { Workspace } from "./ui/workspace/Workspace";
+import { validateSheetName } from "./model/Workbook";
 import "./styles/workspace.css";
 import "./styles/ribbon.css";
 import "./styles/contextmenu.css";
 import "./styles/filter.css";
+import "./styles/note.css";
+import "./styles/control.css";
 import "./styles/print.css";
+import "./styles/find.css";
 
 document.title = "humpk-office";
 
@@ -23,6 +28,7 @@ app.innerHTML = `
   <input id="file-xlsx" type="file" accept=".xlsx" hidden />
   <div id="workspace"></div>
   <div id="tabs"></div>
+  <div id="statusbar"></div>
 `;
 
 const ribbonHost = app.querySelector<HTMLElement>("#ribbon");
@@ -31,13 +37,18 @@ const jsonInput = app.querySelector<HTMLInputElement>("#file-json");
 const xlsxInput = app.querySelector<HTMLInputElement>("#file-xlsx");
 const workspaceHost = app.querySelector<HTMLElement>("#workspace");
 const tabsHost = app.querySelector<HTMLElement>("#tabs");
-if (!ribbonHost || !barHost || !jsonInput || !xlsxInput || !workspaceHost || !tabsHost) {
+const statusHost = app.querySelector<HTMLElement>("#statusbar");
+if (!ribbonHost || !barHost || !jsonInput || !xlsxInput || !workspaceHost || !tabsHost || !statusHost) {
   throw new Error("app chrome missing");
 }
 
 const workspace = new Workspace(workspaceHost);
+workspace.onRequestAppendRows = () => askAppendRows();
+workspace.onRequestRenameSheet = (index, currentName) => renameSheet(index, currentName);
+workspace.onRequestDropdownOptions = (current, apply) => askDropdownOptions(current, apply);
 const formulaBar = new FormulaBar(barHost, workspace);
 const tabs = new SheetTabs(tabsHost, workspace);
+const statusBar = new StatusBar(statusHost, workspace);
 
 const ribbon = new Ribbon(ribbonHost, {
   applyFormat: (action) => workspace.applyFormat(action),
@@ -58,6 +69,8 @@ const ribbon = new Ribbon(ribbonHost, {
     void downloadXlsx();
   },
   print: () => workspace.printPreview(),
+  find: () => workspace.openFind("find"),
+  openReplace: () => workspace.openFind("replace"),
   merge: () => workspace.mergeSelection(),
   unmerge: () => workspace.unmergeSelection(),
   insertImage: () => workspace.pickImage(),
@@ -66,13 +79,29 @@ const ribbon = new Ribbon(ribbonHost, {
   toggleFreeze: () => workspace.toggleFreeze(),
   insertFunction: (name) => workspace.insertFunction(name),
   togglePaintFormat: () => workspace.togglePaintFormat(),
+  setSelectionPriority: (priority) => workspace.setSelectionPriority(priority),
+  setSelectionShape: (shape) => workspace.setSelectionShape(shape),
+  setSelectionVerdict: (verdict) => workspace.setSelectionVerdict(verdict),
+  clearSelectionPriority: () => workspace.clearSelectionPriority(),
+  clearSelectionShape: () => workspace.clearSelectionShape(),
+  unmarkSelection: () => workspace.unmarkSelection(),
+  clearSheetMarks: () => workspace.clearSheetMarks(),
+  editNote: () => workspace.editNote(),
+  deleteNote: () => workspace.deleteNote(),
+  appendRowsBelow: () => askAppendRows(),
   formatState: () => workspace.formatState(),
+  setEditControlEnabled: (on) => workspace.setEditControlEnabled(on),
+  setSelectionTextEdit: () => workspace.setSelectionTextEdit(),
+  requestDropdownOptions: () => workspace.requestDropdownOptions(),
+  setSelectionSwitch: () => workspace.setSelectionControl({ kind: "switch" }),
+  clearSelectionEditable: () => workspace.setSelectionEditable(false),
 });
 
 workspace.onUi(() => {
   ribbon.sync();
   formulaBar.sync();
   tabs.sync();
+  statusBar.sync();
 });
 
 window.addEventListener("resize", () => workspace.render());
@@ -103,6 +132,45 @@ function bindFileInput(input: HTMLInputElement, failText: string): void {
     }
     input.value = "";
   });
+}
+
+function askAppendRows(): void {
+  const raw = window.prompt("在选区下方追加的行数", "1");
+  if (raw == null) {
+    return;
+  }
+  const count = Number(raw);
+  if (!Number.isFinite(count) || count < 1) {
+    window.alert("请输入大于 0 的行数");
+    return;
+  }
+  workspace.appendRowsBelow(count);
+}
+
+function renameSheet(index: number, currentName: string): void {
+  const name = window.prompt("工作表名称", currentName);
+  if (name == null) {
+    return;
+  }
+  const error = validateSheetName(name, workspace.workbook.sheets, index);
+  if (error) {
+    window.alert(error);
+    return;
+  }
+  workspace.renameSheet(index, name);
+}
+
+function askDropdownOptions(current: string[], apply: (options: string[]) => void): void {
+  const raw = window.prompt("下拉选项，一行一个", current.join("\n"));
+  if (raw == null) {
+    return;
+  }
+  const options = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!options.length) {
+    window.alert("至少填写一个选项");
+    return;
+  }
+  apply(options);
 }
 
 function downloadJson(): void {

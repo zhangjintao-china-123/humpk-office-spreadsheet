@@ -2,28 +2,55 @@ import ExcelJS from "exceljs";
 import type { Cell } from "../../model/Cell";
 import { CellRange } from "../../model/CellRange";
 import { stylesEqual, type Align, type BorderStyle, type CellStyle, type VAlign } from "../../model/CellStyle";
+import { formatPlainNumber, isGeneralFormat, isTextFormat } from "../../model/NumberFormat";
 import { Sheet } from "../../model/Sheet";
 import { Workbook } from "../../model/Workbook";
 import { xy2expr } from "../../shared/alphabet";
 import { DEFAULT_COL_LEN, DEFAULT_COL_WIDTH, DEFAULT_ROW_LEN, PT_TO_PX } from "../../shared/constants";
 import { excelColorToCss, type ExcelColor } from "./excelColor";
+import { applyCellMarksToWorkbook, isCellMarksSheet, readCellMarks } from "./cellMarks";
+import { applyCheckmarksToWorkbook, isCheckmarksSheet, readCheckmarks } from "./checkmarks";
+import { applyEditablesToWorkbook, hasEditablesSheet, isEditablesSheet, readEditControlEnabled, readEditables } from "./editables";
+import { excelNoteText } from "./cellNote";
 import { readExcelImages } from "./imageAnchor";
 
 const COL_CHAR_PX = 8;
 
 export class XlsxReader {
+  static async peekCheckmarks(buffer: ArrayBuffer): Promise<number> {
+    const excel = new ExcelJS.Workbook();
+    await excel.xlsx.load(buffer);
+    return readCheckmarks(excel).length;
+  }
+
   async read(buffer: ArrayBuffer): Promise<Workbook> {
     const excel = new ExcelJS.Workbook();
     await excel.xlsx.load(buffer);
     const book = new Workbook();
     book.sheets = [];
     excel.eachSheet((worksheet) => {
+      if (isCheckmarksSheet(worksheet.name) || isEditablesSheet(worksheet.name) || isCellMarksSheet(worksheet.name)) {
+        return;
+      }
       book.sheets.push(this.readSheet(excel, worksheet));
     });
     if (book.sheets.length === 0) {
       book.sheets.push(new Sheet("Sheet1"));
     }
     book.activeIndex = 0;
+    const marks = readCheckmarks(excel);
+    applyCellMarksToWorkbook(book, readCellMarks(excel));
+    applyCheckmarksToWorkbook(book, marks);
+    applyEditablesToWorkbook(book, readEditables(excel));
+    book.editControlConfigured = hasEditablesSheet(excel);
+    if (book.editControlConfigured) {
+      const enabled = readEditControlEnabled(excel);
+      book.keepEditables = enabled;
+      book.enforceEditLock = enabled;
+    }
+    for (const sheet of book.sheets) {
+      sheet.refreshFilterView();
+    }
     return book;
   }
 
@@ -41,11 +68,11 @@ export class XlsxReader {
       row.eachCell({ includeEmpty: true }, (excelCell, colNumber) => {
         const ci = colNumber - 1;
         const cell = convertCell(excelCell);
-        const style = convertStyle(excelCell);
+        const style = preserveExcelTextStyle(excelCell, convertStyle(excelCell));
         if (style && !isEmptyStyle(style)) {
           cell.style = addStyle(styles, style);
         }
-        if (cell.text || cell.style !== undefined) {
+        if (cell.text || cell.style !== undefined || cell.note) {
           sheet.rows.setCell(ri, ci, cell);
         }
       });
@@ -58,6 +85,7 @@ export class XlsxReader {
     const filterRef = readAutoFilterRef(worksheet);
     if (filterRef) {
       sheet.autoFilter.setData({ ref: filterRef, filters: [], sort: null });
+      sheet.alignAutoFilterHeader();
       sheet.refreshFilterView();
     }
     applyFreeze(worksheet, sheet);
@@ -67,9 +95,18 @@ export class XlsxReader {
 
 function convertCell(excelCell: ExcelJS.Cell): Cell {
   const cell: Cell = {};
+  const note = excelNoteText(excelCell.note);
+  if (note) {
+    cell.note = note;
+  }
   const formula = excelCell.formula;
   if (formula) {
     cell.text = formula.startsWith("=") ? formula : `=${formula}`;
+    return cell;
+  }
+  if (typeof excelCell.value === "number" && Number.isFinite(excelCell.value)) {
+    cell.text = formatPlainNumber(excelCell.value);
+    cell.value = excelCell.value;
     return cell;
   }
   cell.text = valueToText(excelCell.value);
@@ -80,7 +117,10 @@ function valueToText(value: ExcelJS.CellValue): string | undefined {
   if (value === null || value === undefined) {
     return undefined;
   }
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (typeof value === "number") {
+    return formatPlainNumber(value);
+  }
+  if (typeof value === "string" || typeof value === "boolean") {
     return String(value);
   }
   if (value instanceof Date) {
@@ -101,6 +141,28 @@ function valueToText(value: ExcelJS.CellValue): string | undefined {
     }
   }
   return String(value);
+}
+
+function isExcelTextCell(excelCell: ExcelJS.Cell): boolean {
+  if (excelCell.type === ExcelJS.ValueType.String) {
+    return true;
+  }
+  const value = excelCell.value;
+  if (typeof value === "string") {
+    return true;
+  }
+  return !!value && typeof value === "object" && "richText" in value && Array.isArray(value.richText);
+}
+
+function preserveExcelTextStyle(excelCell: ExcelJS.Cell, style: CellStyle | undefined): CellStyle | undefined {
+  if (!isExcelTextCell(excelCell)) {
+    return style;
+  }
+  if (style?.numFmt && !isGeneralFormat(style.numFmt) && !isTextFormat(style.numFmt)) {
+    return style;
+  }
+  const next: CellStyle = { ...style, numFmt: "@" };
+  return isEmptyStyle(next) ? undefined : next;
 }
 
 function convertStyle(excelCell: ExcelJS.Cell): CellStyle | undefined {
@@ -137,10 +199,16 @@ function convertStyle(excelCell: ExcelJS.Cell): CellStyle | undefined {
   }
   const fill = excelCell.fill;
   if (fill && fill.type === "pattern") {
-    const fg = (fill as ExcelJS.FillPattern).fgColor as ExcelColor | undefined;
-    if (fg) {
-      style.bgcolor = excelColorToCss(fg, "#ffffff");
+    const pattern = fill as ExcelJS.FillPattern;
+    const fg = pattern.fgColor as ExcelColor | undefined;
+    const bg = pattern.bgColor as ExcelColor | undefined;
+    if (fg || bg) {
+      style.bgcolor = excelColorToCss(fg ?? bg, "#ffffff");
     }
+  }
+  const numFmt = excelCell.numFmt?.trim();
+  if (numFmt && !/^general$/i.test(numFmt)) {
+    style.numFmt = numFmt;
   }
   return isEmptyStyle(style) ? undefined : style;
 }
@@ -205,7 +273,7 @@ function mapVAlign(value: ExcelJS.Alignment["vertical"] | undefined): VAlign | u
 
 function isEmptyStyle(style: CellStyle): boolean {
   return !style.font && !style.align && !style.valign && !style.bgcolor && !style.color
-    && !style.textwrap && !style.strike && !style.underline && !style.border;
+    && !style.textwrap && !style.strike && !style.underline && !style.border && !style.numFmt;
 }
 
 function formatDate(date: Date): string {

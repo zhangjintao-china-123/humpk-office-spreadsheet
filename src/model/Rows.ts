@@ -1,5 +1,5 @@
 import { DEFAULT_ROW_HEIGHT, DEFAULT_ROW_LEN } from "../shared/constants";
-import { cloneCell, type Cell } from "./Cell";
+import { cellIsBlank, cloneCell, type Cell } from "./Cell";
 
 export interface RowData {
   height?: number;
@@ -55,7 +55,7 @@ export class Rows {
   }
 
   setCell(ri: number, ci: number, cell: Cell | undefined): void {
-    if (!cell || (!cell.text && cell.style === undefined && !cell.merge && cell.value === undefined)) {
+    if (cellIsBlank(cell) || !cell) {
       const row = this.data.get(ri);
       if (row?.cells) {
         delete row.cells[ci];

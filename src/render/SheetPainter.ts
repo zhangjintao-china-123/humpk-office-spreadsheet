@@ -1,4 +1,8 @@
-import { cellDisplay } from "../model/Cell";
+import type { FormulaRef } from "../formula/formulaRefs";
+import { formulaColor } from "../formula/formulaRefs";
+import { cellDisplay, cellEditText, cellNoteText } from "../model/Cell";
+import { dropdownBox, isSwitchOn, switchBox } from "../model/CellControl";
+import { cellMarkBadgeReserve } from "../model/CellMarks";
 import { CellRange } from "../model/CellRange";
 import { DEFAULT_STYLE, styleFontCss, type CellStyle } from "../model/CellStyle";
 import type { Sheet } from "../model/Sheet";
@@ -13,20 +17,38 @@ import {
   HEADER_HEIGHT,
   HEADER_TEXT,
   INDEX_WIDTH,
+  BADGE_EDIT,
+  NOTE_MARKER,
   SELECTION_FILL,
   SELECTION_STROKE,
 } from "../shared/constants";
 import type { Draw } from "./Draw";
 import { paintFreezeLines, paintPanes, paneContentOrigin, type PaintPane } from "./FreezePane";
+import { handleBox } from "../selection/ImageHitTester";
+import { fillHandleBox } from "../selection/FillHandle";
+import type { ImageHandle } from "../model/SheetImage";
 import { ImagePainter } from "./ImagePainter";
 import { paintCellBorders } from "./BorderStroke";
 import { paintableBorder } from "./MergeBorder";
 import { hidesHGrid, hidesVGrid } from "./MergeGrid";
+import { cellLineHeight, hasExplicitBreak, wrapLines } from "./textLayout";
 
 export class SheetPainter {
   private readonly images = new ImagePainter();
 
-  paint(draw: Draw, sheet: Sheet, selection: Selection, scrollX: number, scrollY: number, selectedImageId?: number, clipboard?: CellRange): void {
+  paint(
+    draw: Draw,
+    sheet: Sheet,
+    selection: Selection,
+    scrollX: number,
+    scrollY: number,
+    selectedImageId?: number,
+    clipboard?: CellRange,
+    formulaRefs?: FormulaRef[],
+    fillPreview?: CellRange,
+    showFillHandle = true,
+    showEditables = false,
+  ): void {
     const { cssWidth: w, cssHeight: h } = draw;
     draw.clear();
     draw.fillRect(0, 0, w, h, "#ffffff");
@@ -40,6 +62,10 @@ export class SheetPainter {
       const rows = sheet.visibleRowsInView(origin.y, pane.clipH);
       this.paintGrid(draw, sheet, visible, rows, pane);
       this.paintCells(draw, sheet, visible, rows, pane);
+      this.paintCellMarks(draw, sheet, visible, rows, pane);
+      if (showEditables) {
+        this.paintEditables(draw, sheet, visible, rows, pane);
+      }
     }
     for (const pane of panes) {
       this.images.paint(draw, sheet, pane.scrollX, pane.scrollY, selectedImageId, pane);
@@ -47,6 +73,16 @@ export class SheetPainter {
     if (selectedImageId === undefined) {
       for (const pane of panes) {
         this.paintSelection(draw, sheet, selection, pane, clipboard);
+      }
+      if (fillPreview) {
+        for (const pane of panes) {
+          this.paintClipboard(draw, sheet, fillPreview, pane);
+        }
+      }
+    }
+    if (formulaRefs?.length) {
+      for (const pane of panes) {
+        this.paintFormulaRefs(draw, sheet, formulaRefs, pane);
       }
     }
     if (clipboard) {
@@ -58,6 +94,9 @@ export class SheetPainter {
       this.paintFilterButtons(draw, sheet, pane);
     }
     paintFreezeLines(draw, sheet, w, h);
+    if (selectedImageId === undefined) {
+      this.paintFillHandle(draw, sheet, selection, scrollX, scrollY, showFillHandle);
+    }
   }
 
   private paintGrid(
@@ -118,28 +157,51 @@ export class SheetPainter {
           draw.fillRect(x + 1, y + 1, Math.max(0, box.width - 2), Math.max(0, box.height - 2), fill);
         }
         paintCellBorders(draw, x, y, box.width, box.height, paintableBorder(sheet, origin.ri, origin.ci));
-        const text = cellDisplay(cell);
-        if (text) {
-          this.paintText(draw, text, x, y, box.width, box.height, style);
+        const control = sheet.getCellControl(origin.ri, origin.ci);
+        if (control?.kind === "switch") {
+          const track = switchBox(box.width, box.height);
+          draw.switchControl(x + track.x, y + track.y, track.width, track.height, isSwitchOn(cellEditText(cell, style)));
+        } else {
+          const text = cellDisplay(cell, style);
+          if (text) {
+            const markReserve = cellMarkBadgeReserve(box.width, box.height, sheet.displayCellMark(origin.ri, origin.ci));
+            const dropdownReserve = control?.kind === "dropdown" ? dropdownBox(box.width, box.height).width : 0;
+            const textWidth = Math.max(0, box.width - Math.max(markReserve, dropdownReserve));
+            this.paintText(draw, text, x, y, textWidth, box.height, style, sheet.cellAlign(origin.ri, origin.ci));
+          }
+          if (control?.kind === "dropdown") {
+            draw.cellDropdown(x, y, box.width, box.height);
+          }
+        }
+        if (cellNoteText(cell)) {
+          draw.noteMarker(x, y, box.width, box.height, NOTE_MARKER);
         }
       }
     }
     draw.restore();
   }
 
-  private paintText(draw: Draw, text: string, x: number, y: number, width: number, height: number, style: CellStyle): void {
+  private paintText(
+    draw: Draw,
+    text: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    style: CellStyle,
+    align = style.align ?? "left",
+  ): void {
     draw.save();
     draw.clipRect(x + 1, y + 1, width - 2, height - 2);
     draw.setFont(styleFontCss(style));
-    const align = style.align ?? "left";
     const valign = style.valign ?? "middle";
     const tx = align === "center" ? x + width / 2 : align === "right" ? x + width - CELL_PAD : x + CELL_PAD;
     const ty = valign === "top" ? y + CELL_PAD : valign === "bottom" ? y + height - CELL_PAD : y + height / 2;
     const baseline: CanvasTextBaseline = valign === "top" ? "top" : valign === "bottom" ? "bottom" : "middle";
     const color = style.color ?? DEFAULT_STYLE.color;
-    if (style.textwrap) {
-      const lines = wrapLines(draw, text, width - CELL_PAD * 2);
-      const lineH = (style.font?.size ?? 10) * (96 / 72) + 2;
+    if (style.textwrap || hasExplicitBreak(text)) {
+      const lines = wrapLines(draw, text, width - CELL_PAD * 2, !!style.textwrap);
+      const lineH = cellLineHeight(style);
       let startY = ty;
       if (valign === "middle") {
         startY = y + height / 2 - ((lines.length - 1) * lineH) / 2;
@@ -167,6 +229,84 @@ export class SheetPainter {
     draw.restore();
   }
 
+  private paintEditables(
+    draw: Draw,
+    sheet: Sheet,
+    visible: CellRange,
+    rows: Array<{ ri: number; top: number; height: number }>,
+    pane: PaintPane,
+  ): void {
+    draw.save();
+    draw.clipRect(pane.clipX, pane.clipY, pane.clipW, pane.clipH);
+    for (const row of rows) {
+      const y = HEADER_HEIGHT + row.top - pane.scrollY;
+      for (let ci = visible.sci; ci <= visible.eci; ci += 1) {
+        if (!sheet.hasEditable(row.ri, ci) || sheet.getCellControl(row.ri, ci)) continue;
+        const x = INDEX_WIDTH + sheet.colLeft(ci) - pane.scrollX;
+        const width = sheet.cols.getWidth(ci);
+        if (x > pane.clipX + pane.clipW || x + width < pane.clipX) continue;
+        draw.editBadge(x, y, width, row.height, BADGE_EDIT);
+      }
+    }
+    draw.restore();
+  }
+
+  private paintFormulaRefs(draw: Draw, sheet: Sheet, refs: FormulaRef[], pane: PaintPane): void {
+    draw.save();
+    draw.clipRect(pane.clipX, pane.clipY, pane.clipW, pane.clipH);
+    const handles: ImageHandle[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+    for (const ref of refs) {
+      const box = rangeScreenBox(sheet, ref.range, pane);
+      if (box.width <= 0 || box.height <= 0) {
+        continue;
+      }
+      const color = formulaColor(ref.colorIndex);
+      draw.fillRect(box.x, box.y, box.width, box.height, color.fill);
+      draw.strokeRect(box.x, box.y, box.width, box.height, color.stroke, 2);
+      for (const handle of handles) {
+        const item = handleBox(box, handle);
+        draw.fillRect(item.x, item.y, item.size, item.size, "#ffffff");
+        draw.strokeRect(item.x, item.y, item.size, item.size, color.stroke, 1);
+      }
+    }
+    draw.restore();
+  }
+
+  private paintCellMarks(
+    draw: Draw,
+    sheet: Sheet,
+    visible: CellRange,
+    rows: Array<{ ri: number; top: number; height: number }>,
+    pane: PaintPane,
+  ): void {
+    draw.save();
+    draw.clipRect(pane.clipX, pane.clipY, pane.clipW, pane.clipH);
+    const painted = new Set<string>();
+    for (const row of rows) {
+      for (let ci = visible.sci; ci <= visible.eci; ci += 1) {
+        const origin = sheet.mergeOrigin(row.ri, ci);
+        const key = `${origin.ri},${origin.ci}`;
+        if (painted.has(key)) {
+          continue;
+        }
+        painted.add(key);
+        const mark = sheet.displayCellMark(origin.ri, origin.ci);
+        if (!mark) {
+          continue;
+        }
+        const box = sheet.cellBox(origin.ri, origin.ci);
+        const x = INDEX_WIDTH + box.x - pane.scrollX;
+        const y = HEADER_HEIGHT + sheet.rowTop(origin.ri) - pane.scrollY;
+        if (x > pane.clipX + pane.clipW || y > pane.clipY + pane.clipH
+          || x + box.width < pane.clipX || y + box.height < pane.clipY) {
+          continue;
+        }
+        draw.cellMarkBadges(x, y, box.width, box.height, mark);
+      }
+    }
+    draw.restore();
+  }
+
   private paintSelection(
     draw: Draw,
     sheet: Sheet,
@@ -174,14 +314,35 @@ export class SheetPainter {
     pane: PaintPane,
     clipboard?: CellRange,
   ): void {
-    const box = rangeScreenBox(sheet, selection.range, pane);
     draw.save();
     draw.clipRect(pane.clipX, pane.clipY, pane.clipW, pane.clipH);
-    draw.fillRect(box.x, box.y, box.width, box.height, SELECTION_FILL);
-    if (!sameRange(selection.range, clipboard)) {
-      draw.strokeRect(box.x, box.y, box.width, box.height, SELECTION_STROKE, 2);
+    for (const range of selection.ranges()) {
+      const box = rangeScreenBox(sheet, range, pane);
+      if (box.width <= 0 || box.height <= 0) {
+        continue;
+      }
+      draw.fillRect(box.x, box.y, box.width, box.height, SELECTION_FILL);
+      if (!sameRange(range, clipboard)) {
+        draw.strokeRect(box.x, box.y, box.width, box.height, SELECTION_STROKE, 2);
+      }
     }
     draw.restore();
+  }
+
+  private paintFillHandle(
+    draw: Draw,
+    sheet: Sheet,
+    selection: Selection,
+    scrollX: number,
+    scrollY: number,
+    show: boolean,
+  ): void {
+    if (!show) {
+      return;
+    }
+    const box = fillHandleBox(sheet, selection.range, scrollX, scrollY);
+    draw.fillRect(box.x, box.y, box.size, box.size, "#ffffff");
+    draw.strokeRect(box.x, box.y, box.size, box.size, SELECTION_STROKE, 1);
   }
 
   private paintClipboard(
@@ -250,7 +411,7 @@ export class SheetPainter {
     draw.save();
     draw.clipRect(pane.clipX, pane.clipY, pane.clipW, pane.clipH);
     for (let ci = header.sci; ci <= header.eci; ci += 1) {
-      const box = sheet.cellBox(header.sri, ci);
+      const box = sheet.filterHeaderBox(header.sri, ci);
       const x = INDEX_WIDTH + box.x - pane.scrollX;
       const y = HEADER_HEIGHT + box.y - pane.scrollY;
       if (x > pane.clipX + pane.clipW || y > pane.clipY + pane.clipH
@@ -275,7 +436,7 @@ function paintColHeaders(
   for (let ci = sci; ci <= eci; ci += 1) {
     const x = INDEX_WIDTH + sheet.colLeft(ci) - scrollX;
     const width = sheet.cols.getWidth(ci);
-    const active = selection.range.sci <= ci && ci <= selection.range.eci;
+    const active = selection.coversCol(ci);
     if (active) {
       draw.fillRect(x, 0, width, HEADER_HEIGHT, HEADER_ACTIVE_BG);
     }
@@ -293,7 +454,7 @@ function paintRowHeaders(
 ): void {
   for (const row of rows) {
     const y = HEADER_HEIGHT + row.top - scrollY;
-    const active = selection.range.sri <= row.ri && row.ri <= selection.range.eri;
+    const active = selection.coversRow(row.ri);
     if (active) {
       draw.fillRect(0, y, INDEX_WIDTH, row.height, HEADER_ACTIVE_BG);
     }
@@ -396,20 +557,3 @@ export function rangeScreenBox(
   return { x, y, width, height };
 }
 
-function wrapLines(draw: Draw, text: string, maxWidth: number): string[] {
-  const lines: string[] = [];
-  for (const paragraph of text.split("\n")) {
-    let current = "";
-    for (const ch of paragraph) {
-      const next = current + ch;
-      if (current && draw.measureText(next) > maxWidth) {
-        lines.push(current);
-        current = ch;
-      } else {
-        current = next;
-      }
-    }
-    lines.push(current);
-  }
-  return lines.length ? lines : [""];
-}

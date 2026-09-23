@@ -76,6 +76,18 @@ describe("json io", () => {
     expect(loaded.sheets[0].isRowHidden(1)).toBe(false);
   });
 
+  it("roundtrips table name and filters", () => {
+    const book = Workbook.blank("销售表 2024");
+    book.active().table = "销售表";
+    book.active().filters = { 年份: 2024, 部门: "华东" };
+    const json = new WorkbookWriter().write(book);
+    expect(json[0].table).toBe("销售表");
+    expect(json[0].filters).toEqual({ 年份: 2024, 部门: "华东" });
+    const loaded = new WorkbookReader().read(json);
+    expect(loaded.sheets[0].table).toBe("销售表");
+    expect(loaded.sheets[0].filters).toEqual({ 年份: 2024, 部门: "华东" });
+  });
+
   it("reads empty input as a blank book", () => {
     const loaded = new WorkbookReader().read(null);
     expect(loaded.sheets[0]).toBeInstanceOf(Sheet);

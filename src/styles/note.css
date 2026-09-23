@@ -1,0 +1,81 @@
+.ho-sheet-note-editor {
+  position: absolute;
+  z-index: 50;
+  width: 260px;
+  padding: 10px 10px 8px;
+  background: #fffbe6;
+  border: 1px solid #e2c56a;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+}
+
+.ho-sheet-note-editor-title {
+  margin-bottom: 6px;
+  color: #6b4f12;
+  font: 12px/1.4 "Segoe UI", "PingFang SC", sans-serif;
+}
+
+.ho-sheet-note-editor-text {
+  display: block;
+  width: 100%;
+  min-height: 92px;
+  padding: 6px 8px;
+  border: 1px solid #ead79a;
+  border-radius: 2px;
+  background: #fffdf3;
+  color: #222;
+  font: 13px/1.45 "Segoe UI", "PingFang SC", sans-serif;
+  resize: vertical;
+}
+
+.ho-sheet-note-editor-text:focus {
+  outline: 1px solid #c9a227;
+}
+
+.ho-sheet-note-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ho-sheet-note-editor-spacer {
+  flex: 1;
+}
+
+.ho-sheet-note-editor-actions button {
+  padding: 4px 10px;
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  color: #222;
+  font: 12px "Segoe UI", "PingFang SC", sans-serif;
+  cursor: pointer;
+}
+
+.ho-sheet-note-editor-actions button:hover {
+  background: #f3f3f3;
+}
+
+.ho-sheet-note-editor-actions button.is-primary {
+  border-color: #217346;
+  background: #217346;
+  color: #fff;
+}
+
+.ho-sheet-note-editor-actions button.is-primary:hover {
+  background: #1b5c38;
+}
+
+.ho-sheet-note-tip {
+  position: absolute;
+  z-index: 45;
+  max-width: 280px;
+  padding: 8px 10px;
+  background: #fffbe6;
+  border: 1px solid #e2c56a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+  color: #3f2f0c;
+  font: 12px/1.45 "Segoe UI", "PingFang SC", sans-serif;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+}

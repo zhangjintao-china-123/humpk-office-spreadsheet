@@ -1,3 +1,5 @@
+import { cssFontFamily } from "./FontFamily";
+
 export type Align = "left" | "center" | "right";
 export type VAlign = "top" | "middle" | "bottom";
 export type BorderSide = [string, string];
@@ -26,6 +28,7 @@ export interface CellStyle {
   underline?: boolean;
   font?: FontStyle;
   border?: BorderStyle;
+  numFmt?: string;
 }
 
 export const DEFAULT_STYLE: Required<Omit<CellStyle, "border">> & { border?: BorderStyle } = {
@@ -37,6 +40,7 @@ export const DEFAULT_STYLE: Required<Omit<CellStyle, "border">> & { border?: Bor
   underline: false,
   color: "#0a0a0a",
   font: { name: "Arial", size: 10, bold: false, italic: false },
+  numFmt: "General",
 };
 
 export function mergeStyle(base: CellStyle, patch: CellStyle): CellStyle {
@@ -84,6 +88,7 @@ export function normalizeStyle(style: CellStyle): CellStyle {
     textwrap: style.textwrap,
     strike: style.strike,
     underline: style.underline,
+    numFmt: style.numFmt,
     font: font
       ? {
           name: font.name,
@@ -108,5 +113,5 @@ export function styleFontCss(style: CellStyle): string {
   const size = (font.size ?? 10) * (96 / 72);
   const italic = font.italic ? "italic" : "normal";
   const weight = font.bold ? "bold" : "normal";
-  return `${italic} ${weight} ${size}px ${font.name ?? "Arial"}`;
+  return `${italic} ${weight} ${size}px ${cssFontFamily(font.name)}`;
 }

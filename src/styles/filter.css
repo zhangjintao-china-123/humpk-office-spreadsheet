@@ -1,7 +1,9 @@
 .ho-sheet-sort-filter {
   position: absolute;
   z-index: 40;
-  width: 260px;
+  width: 300px;
+  max-height: 72vh;
+  overflow: auto;
   padding: 6px 0 8px;
   background: #fff;
   border: 1px solid #d0d0d0;
@@ -10,10 +12,10 @@
 }
 
 .ho-sheet-sort-item,
-.ho-sheet-filter-head,
 .ho-sheet-filter-item,
 .ho-sheet-filter-actions button {
-  display: block;
+  display: flex;
+  align-items: center;
   width: 100%;
   padding: 6px 16px;
   border: 0;
@@ -22,10 +24,10 @@
   font: 13px "Segoe UI", "PingFang SC", sans-serif;
   text-align: left;
   cursor: pointer;
+  box-sizing: border-box;
 }
 
 .ho-sheet-sort-item:hover,
-.ho-sheet-filter-head:hover,
 .ho-sheet-filter-item:hover,
 .ho-sheet-filter-actions button:hover {
   background: #f3f3f3;
@@ -60,8 +62,47 @@
 }
 
 .ho-sheet-filter-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
   background: #f8f8f9;
+  font: 12px "Segoe UI", "PingFang SC", sans-serif;
+  color: #555;
+}
+
+.ho-sheet-filter-top {
+  justify-content: flex-end;
+  margin: 0 0 2px;
+  background: #fff;
+}
+
+.ho-sheet-filter-count {
   font-weight: 600;
+  color: #222;
+}
+
+.ho-sheet-filter-toggles {
+  display: flex;
+  gap: 6px;
+}
+
+.ho-sheet-filter-toggles button {
+  padding: 2px 8px;
+  border: 0;
+  background: none;
+  color: #217346;
+  font: 12px "Segoe UI", "PingFang SC", sans-serif;
+  cursor: pointer;
+}
+
+.ho-sheet-filter-top .ho-sheet-filter-toggles button {
+  font-size: 13px;
+}
+
+.ho-sheet-filter-toggles button:hover {
+  text-decoration: underline;
 }
 
 .ho-sheet-filter-body {
@@ -69,9 +110,21 @@
   overflow: auto;
 }
 
-.ho-sheet-filter-item span {
-  float: right;
+.ho-sheet-filter-body .ho-sheet-sort-split {
+  margin: 2px 8px;
+}
+
+.ho-sheet-filter-item span:last-child {
+  float: none;
+  margin-left: auto;
   opacity: 0.65;
+}
+
+.ho-sheet-filter-item-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .ho-sheet-filter-actions {
@@ -91,4 +144,38 @@
   background: #217346;
   border-color: #217346;
   color: #fff;
+}
+
+.ho-sheet-filter-group {
+  padding: 2px 0 4px;
+}
+
+.ho-sheet-filter-group-label {
+  padding: 4px 16px 2px;
+  font: 11px "Segoe UI", "PingFang SC", sans-serif;
+  color: #666;
+}
+
+.ho-sheet-filter-list .ho-sheet-filter-item {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.ho-sheet-sort-filter .ho-sheet-mark-chip {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  flex: 0 0 auto;
+}
+
+.ho-sheet-sort-filter .ho-sheet-mark-chip svg {
+  display: block;
 }

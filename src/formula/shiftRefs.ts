@@ -39,9 +39,14 @@ export function shiftSheetFormulas(sheet: Sheet, spec: ShiftSpec): void {
 function shiftAst(ast: Ast, spec: ShiftSpec): Ast {
   switch (ast.kind) {
     case "ref":
-      return { kind: "ref", value: shiftRef(ast.value, spec) };
+      return { kind: "ref", value: shiftRef(ast.value, spec), sheet: ast.sheet };
     case "range":
-      return { kind: "range", start: shiftRef(ast.start, spec), end: shiftRef(ast.end, spec) };
+      return {
+        kind: "range",
+        start: shiftRef(ast.start, spec),
+        end: shiftRef(ast.end, spec),
+        sheet: ast.sheet,
+      };
     case "unary":
       return { kind: "unary", op: "-", expr: shiftAst(ast.expr, spec) };
     case "binary":
@@ -78,6 +83,16 @@ function shiftRef(ref: string, spec: ShiftSpec): string {
   return ref;
 }
 
+function printSheetRef(sheet: string | undefined, ref: string): string {
+  if (!sheet) {
+    return ref;
+  }
+  const quoted = /^[A-Za-z_][A-Za-z0-9_]*$/.test(sheet)
+    ? sheet
+    : `'${sheet.replaceAll("'", "''")}'`;
+  return `${quoted}!${ref}`;
+}
+
 function printAst(ast: Ast): string {
   switch (ast.kind) {
     case "number":
@@ -85,9 +100,9 @@ function printAst(ast: Ast): string {
     case "string":
       return `"${ast.value}"`;
     case "ref":
-      return ast.value;
+      return printSheetRef(ast.sheet, ast.value);
     case "range":
-      return `${ast.start}:${ast.end}`;
+      return printSheetRef(ast.sheet, `${ast.start}:${ast.end}`);
     case "unary":
       return `-${printAst(ast.expr)}`;
     case "binary":

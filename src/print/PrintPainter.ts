@@ -1,4 +1,5 @@
-import { cellDisplay } from "../model/Cell";
+import { cellDisplay, cellNoteText } from "../model/Cell";
+import { cellMarkBadgeReserve, isEmptyMark } from "../model/CellMarks";
 import { CellRange } from "../model/CellRange";
 import { DEFAULT_STYLE, styleFontCss, type CellStyle } from "../model/CellStyle";
 import type { Sheet } from "../model/Sheet";
@@ -8,7 +9,8 @@ import { imageCache } from "../render/image/ImageCache";
 import { paintCellBorders } from "../render/BorderStroke";
 import { paintableBorder } from "../render/MergeBorder";
 import { hidesHGrid, hidesVGrid } from "../render/MergeGrid";
-import { CELL_PAD, GRID_COLOR, HEADER_HEIGHT, INDEX_WIDTH } from "../shared/constants";
+import { cellLineHeight, hasExplicitBreak, wrapLines } from "../render/textLayout";
+import { CELL_PAD, GRID_COLOR, HEADER_HEIGHT, INDEX_WIDTH, NOTE_MARKER } from "../shared/constants";
 import type { PrintPage } from "./PrintPage";
 import type { PrintSetup } from "./PrintSetup";
 
@@ -151,27 +153,44 @@ function paintCells(
         draw.fillRect(x + 1, y + 1, Math.max(0, box.width - 2), Math.max(0, box.height - 2), fill);
       }
       paintCellBorders(draw, x, y, box.width, box.height, paintableBorder(sheet, origin.ri, origin.ci));
-      const text = cellDisplay(cell);
+      const text = cellDisplay(cell, style);
       if (text) {
-        paintText(draw, text, x, y, box.width, box.height, style);
+        const markReserve = cellMarkBadgeReserve(box.width, box.height, sheet.displayCellMark(origin.ri, origin.ci));
+        const textWidth = Math.max(0, box.width - markReserve);
+        paintText(draw, text, x, y, textWidth, box.height, style, sheet.cellAlign(origin.ri, origin.ci));
+      }
+      if (cellNoteText(cell)) {
+        draw.noteMarker(x, y, box.width, box.height, NOTE_MARKER);
+      }
+      const mark = sheet.displayCellMark(origin.ri, origin.ci);
+      if (!isEmptyMark(mark) && mark) {
+        draw.cellMarkBadges(x, y, box.width, box.height, mark);
       }
     }
   }
 }
 
-function paintText(draw: Draw, text: string, x: number, y: number, width: number, height: number, style: CellStyle): void {
+function paintText(
+  draw: Draw,
+  text: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  style: CellStyle,
+  align = style.align ?? "left",
+): void {
   draw.save();
   draw.clipRect(x + 1, y + 1, width - 2, height - 2);
   draw.setFont(styleFontCss(style));
-  const align = style.align ?? "left";
   const valign = style.valign ?? "middle";
   const tx = align === "center" ? x + width / 2 : align === "right" ? x + width - CELL_PAD : x + CELL_PAD;
   const ty = valign === "top" ? y + CELL_PAD : valign === "bottom" ? y + height - CELL_PAD : y + height / 2;
   const baseline: CanvasTextBaseline = valign === "top" ? "top" : valign === "bottom" ? "bottom" : "middle";
   const color = style.color ?? DEFAULT_STYLE.color;
-  if (style.textwrap) {
-    const lines = wrapLines(draw, text, width - CELL_PAD * 2);
-    const lineH = (style.font?.size ?? 10) * (96 / 72) + 2;
+  if (style.textwrap || hasExplicitBreak(text)) {
+    const lines = wrapLines(draw, text, width - CELL_PAD * 2, !!style.textwrap);
+    const lineH = cellLineHeight(style);
     let startY = ty;
     if (valign === "middle") {
       startY = y + height / 2 - ((lines.length - 1) * lineH) / 2;
@@ -202,20 +221,3 @@ function paintImages(draw: Draw, sheet: Sheet, page: PrintPage, setup: PrintSetu
   }
 }
 
-function wrapLines(draw: Draw, text: string, maxWidth: number): string[] {
-  const lines: string[] = [];
-  for (const paragraph of text.split("\n")) {
-    let current = "";
-    for (const ch of paragraph) {
-      const next = current + ch;
-      if (current && draw.measureText(next) > maxWidth) {
-        lines.push(current);
-        current = ch;
-      } else {
-        current = next;
-      }
-    }
-    lines.push(current);
-  }
-  return lines.length ? lines : [""];
-}

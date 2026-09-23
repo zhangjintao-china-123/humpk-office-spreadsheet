@@ -117,6 +117,9 @@ body,
   border: 2px solid #2e73c1;
   outline: none;
   resize: none;
+  overflow: hidden;
+  white-space: pre;
+  overflow-wrap: normal;
   font: 13px Arial;
   line-height: 1.2;
   background: #fff;
@@ -124,6 +127,11 @@ body,
 
 .ho-sheet-editor.is-on {
   display: block;
+}
+
+.ho-sheet-editor.is-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .ho-sheet-capture {
@@ -195,26 +203,76 @@ body,
 .ho-sheet-tabs {
   display: flex;
   align-items: center;
+  gap: 2px;
   height: 28px;
-  padding: 0 8px;
+  padding: 0 4px 0 2px;
   background: #f3f3f3;
   border-top: 1px solid #d0d0d0;
   flex-shrink: 0;
 }
 
+.ho-sheet-tab-nav {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.ho-sheet-tab-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #444;
+}
+
+.ho-sheet-tab-arrow:hover:not(:disabled) {
+  background: #e6e6e6;
+  border-color: #c6c6c6;
+}
+
+.ho-sheet-tab-arrow:disabled {
+  color: #bbb;
+  cursor: default;
+}
+
 .ho-sheet-tab-list {
   display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 2px;
-  overflow: auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.ho-sheet-tab-list::-webkit-scrollbar {
+  display: none;
 }
 
 .ho-sheet-tab,
 .ho-sheet-tab-add {
+  flex: 0 0 auto;
   height: 22px;
   padding: 0 10px;
   border: 1px solid transparent;
   background: transparent;
   font-size: 12px;
+  line-height: 20px;
+}
+
+.ho-sheet-tab {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+  cursor: grab;
 }
 
 .ho-sheet-tab.is-on {
@@ -223,7 +281,90 @@ body,
   border-bottom-color: #fff;
 }
 
+.ho-sheet-tab.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.ho-sheet-tab.drop-before {
+  box-shadow: inset 2px 0 0 #1677ff;
+}
+
+.ho-sheet-tab.drop-after {
+  box-shadow: inset -2px 0 0 #1677ff;
+}
+
 .ho-sheet-tab-add {
   font-size: 16px;
   line-height: 18px;
+}
+
+.ho-sheet-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 22px;
+  padding: 0 8px;
+  background: #f3f3f3;
+  border-top: 1px solid #d0d0d0;
+  color: #444;
+  font-size: 11px;
+  line-height: 16px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.ho-sheet-statusbar-left,
+.ho-sheet-statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ho-sheet-statusbar-left {
+  flex: 1;
+}
+
+.ho-sheet-statusbar-right {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.ho-sheet-statusbar [data-status-mode] {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.ho-sheet-statusbar [data-status-mode].is-locked {
+  color: #ad4e00;
+}
+
+.ho-sheet-statusbar [data-status-mode].is-editable {
+  color: #1677ff;
+}
+
+.ho-sheet-statusbar [data-status-range] {
+  color: #666;
+  white-space: nowrap;
+}
+
+.ho-sheet-statusbar .ho-sheet-save-status {
+  margin-left: 0;
+  opacity: 0.78;
+}
+
+.ho-sheet-statusbar .ho-sheet-save-status.is-dirty {
+  opacity: 1;
+  color: #ad4e00;
+}
+
+.ho-sheet-statusbar-stat {
+  white-space: nowrap;
+}
+
+.ho-sheet-statusbar-stat.is-split {
+  padding-left: 10px;
+  border-left: 1px solid #d0d0d0;
 }

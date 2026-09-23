@@ -1,0 +1,35 @@
+.ho-sheet-cell-select {
+  position: fixed;
+  z-index: 45;
+  max-height: 240px;
+  overflow: auto;
+  padding: 4px 0;
+  background: #fff;
+  border: 1px solid #c6c6c6;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  user-select: none;
+}
+
+.ho-sheet-cell-select-item {
+  display: block;
+  width: 100%;
+  min-height: 26px;
+  padding: 4px 16px;
+  border: 0;
+  background: transparent;
+  color: #222;
+  font: 13px "Segoe UI", "PingFang SC", sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ho-sheet-cell-select-item:hover,
+.ho-sheet-cell-select-item.is-on {
+  background: #e6f0fa;
+}
+
+.ho-sheet-cell-select-empty {
+  padding: 10px 16px;
+  color: #888;
+  font: 12px "Segoe UI", "PingFang SC", sans-serif;
+}

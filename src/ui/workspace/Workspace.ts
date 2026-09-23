@@ -1,6 +1,7 @@
 import { AddImageCommand } from "../../edit/AddImageCommand";
 import { ApplyAutoFilterCommand } from "../../edit/ApplyAutoFilterCommand";
 import { ApplyBorderCommand } from "../../edit/ApplyBorderCommand";
+import { ApplyCellPatchesCommand } from "../../edit/ApplyCellPatchesCommand";
 import { ClearRangeCommand } from "../../edit/ClearRangeCommand";
 import { Clipboard } from "../../edit/Clipboard";
 import { DeleteColumnCommand } from "../../edit/DeleteColumnCommand";
@@ -8,6 +9,7 @@ import { DeleteImageCommand } from "../../edit/DeleteImageCommand";
 import { DeleteRowCommand } from "../../edit/DeleteRowCommand";
 import type { EditHost } from "../../edit/EditHost";
 import type { BorderMode, FormatAction } from "../../edit/FormatAction";
+import { FillCommand } from "../../edit/FillCommand";
 import { History } from "../../edit/History";
 import { InsertColumnCommand } from "../../edit/InsertColumnCommand";
 import { InsertRowCommand } from "../../edit/InsertRowCommand";
@@ -15,6 +17,8 @@ import { MergeCommand } from "../../edit/MergeCommand";
 import { PaintFormatCommand } from "../../edit/PaintFormatCommand";
 import { PasteCommand } from "../../edit/PasteCommand";
 import { ResizeCommand } from "../../edit/ResizeCommand";
+import { SetCellMarksCommand } from "../../edit/SetCellMarksCommand";
+import { SetCellNoteCommand } from "../../edit/SetCellNoteCommand";
 import { SetCellStyleCommand } from "../../edit/SetCellStyleCommand";
 import { SetCellTextCommand } from "../../edit/SetCellTextCommand";
 import { SetFreezeCommand } from "../../edit/SetFreezeCommand";
@@ -22,17 +26,50 @@ import { ToggleAutoFilterCommand } from "../../edit/ToggleAutoFilterCommand";
 import { UnmergeCommand } from "../../edit/UnmergeCommand";
 import { UpdateImageCommand } from "../../edit/UpdateImageCommand";
 import { ContextMenu, type MenuAction } from "../contextmenu/ContextMenu";
+import {
+  applyPointRef,
+  isFormulaText,
+  nudgeFormulaRange,
+  rewriteFormulaRef,
+  type FormulaEditState,
+} from "../../formula/formulaEdit";
+import { scanFormulaRefs, type FormulaRef } from "../../formula/formulaRefs";
 import { FORMULA_ITEMS, formulaStub, guessNumberRange } from "../../formula/FormulaInsert";
 import { FormulaEngine } from "../../formula/FormulaEngine";
 import { WorkbookReader } from "../../io/json/WorkbookReader";
 import { WorkbookWriter } from "../../io/json/WorkbookWriter";
-import { cellDisplay } from "../../model/Cell";
+import { cellDisplay, cellEditText, cellNoteText } from "../../model/Cell";
+import {
+  hitDropdownControl,
+  hitSwitchControl,
+  isSwitchOn,
+  switchCellText,
+  type CellControl,
+} from "../../model/CellControl";
 import { CellRange } from "../../model/CellRange";
-import { cloneStyle, DEFAULT_STYLE, type CellStyle } from "../../model/CellStyle";
+import { cloneStyle, DEFAULT_STYLE, styleFontCss, type CellStyle } from "../../model/CellStyle";
+import { bumpDecimalPlaces, isNumericDisplayFormat } from "../../model/NumberFormat";
+import { hasExplicitBreak, wrapLines } from "../../render/textLayout";
+import { CellBadges, type ReconcileBadge } from "../../model/CellBadges";
+import {
+  cellMarkBadgeReserve,
+  cloneMark,
+  isEmptyMark,
+  marksEqual,
+  parsePriorityMark,
+  parseShapeMark,
+  parseVerdictMark,
+  type CellMark,
+  type CellPriorityMark,
+  type CellShapeMark,
+  type CellVerdictMark,
+  type MarkedCellRange,
+} from "../../model/CellMarks";
 import type { Sheet } from "../../model/Sheet";
 import type { WorkbookJson } from "../../model/SheetJson";
 import { Workbook } from "../../model/Workbook";
 import type { SheetImageOptions } from "../../model/SheetImage";
+import type { FillAxis } from "../../selection/FillHandle";
 import { Draw } from "../../render/Draw";
 import { cellScreenXY } from "../../render/FreezePane";
 import { imageCache } from "../../render/image/ImageCache";
@@ -48,20 +85,33 @@ import {
   SCROLLBAR_SIZE,
 } from "../../shared/constants";
 import { SheetScrollbar } from "./SheetScrollbar";
-import { xy2expr } from "../../shared/alphabet";
+import { expr2xy, xy2expr } from "../../shared/alphabet";
+import { CELL_MARKS_SHEET } from "../../io/xlsx/cellMarks";
+import { CHECKMARKS_SHEET } from "../../io/xlsx/checkmarks";
 import { PrintPreview } from "../../print/PrintPreview";
+import { FindDialog } from "../find/FindDialog";
+import { CellSelectDropdown } from "../control/CellSelectDropdown";
 import { FilterDropdown } from "../filter/FilterDropdown";
+import { NoteEditor } from "../note/NoteEditor";
+import { NoteTip } from "../note/NoteTip";
 import { InputController } from "../input/InputController";
 import { PointerController } from "../pointer/PointerController";
+import { editorBoxSize } from "./editorBox";
+
+const editorMeasure = document.createElement("canvas").getContext("2d")!;
 
 export class Workspace implements EditHost {
   workbook = Workbook.blank();
   readonly history = new History();
   readonly selection = new Selection();
+  readonly cellBadges = new CellBadges();
   readonly clipboard = new Clipboard();
   readonly engineInst = new FormulaEngine();
   editing = false;
-  private readonly root: HTMLElement;
+  formulaBarCommit: (() => void) | null = null;
+  formulaBarApply: ((text: string, cursor: number) => void) | null = null;
+  formulaSession: FormulaEditState | null = null;
+  readonly root: HTMLElement;
   readonly scroll: HTMLElement;
   private readonly sizer: HTMLElement;
   private readonly vbar: SheetScrollbar;
@@ -75,24 +125,37 @@ export class Workspace implements EditHost {
   private readonly pointer: PointerController;
   private readonly input: InputController;
   private readonly uiListeners: Array<() => void> = [];
+  private readonly changeListeners: Array<() => void> = [];
   private readonly writer = new WorkbookWriter();
   private readonly reader = new WorkbookReader();
-  private readonly menu = new ContextMenu((action) => this.onMenu(action));
+  private readonly menu: ContextMenu;
+  readonly templateMode: boolean;
   private readonly filterMenu = new FilterDropdown();
+  private readonly cellSelect = new CellSelectDropdown();
+  private readonly noteEditor = new NoteEditor();
+  private readonly noteTip = new NoteTip();
   private readonly printUi = new PrintPreview();
+  private readonly findUi = new FindDialog(this);
+  onRequestDropdownOptions: ((current: string[], apply: (options: string[]) => void) => void) | null = null;
   private resizePrev = 0;
   private focusTimer = 0;
+  private readonly resizeObserver: ResizeObserver;
   selectedImageId: number | undefined;
   private paintFormat: { sheet: Sheet; range: CellRange; styles: Array<Array<CellStyle | undefined>> } | null = null;
   caption = "未命名工作簿";
+  captionMeta: Array<{ label: string; value: string }> = [];
+  onHistoryPersist?: () => void;
+  fillPreview?: CellRange;
 
-  constructor(host: HTMLElement) {
+  constructor(host: HTMLElement, options?: { templateMode?: boolean }) {
+    this.templateMode = options?.templateMode === true;
+    this.menu = new ContextMenu((action, value) => this.onMenu(action, value), { templateMode: this.templateMode });
     this.root = host;
     host.classList.add("ho-sheet-workspace");
     host.innerHTML = `
       <div class="ho-sheet-scroll"></div>
       <canvas class="ho-sheet-canvas"></canvas>
-      <textarea class="ho-sheet-editor" spellcheck="false" autocomplete="off"></textarea>
+      <textarea class="ho-sheet-editor" spellcheck="false" autocomplete="off" wrap="off"></textarea>
       <input class="ho-sheet-capture" spellcheck="false" autocomplete="off" />
     `;
     this.scroll = host.querySelector(".ho-sheet-scroll")!;
@@ -102,6 +165,12 @@ export class Workspace implements EditHost {
     this.canvas = host.querySelector(".ho-sheet-canvas")!;
     this.editor = host.querySelector(".ho-sheet-editor")!;
     this.capture = host.querySelector(".ho-sheet-capture")!;
+    this.editor.addEventListener("input", () => {
+      if (this.editing) {
+        this.placeEditor();
+        this.updateFormulaEdit(this.editor.value, this.editor.selectionStart);
+      }
+    });
     this.draw = new Draw(this.canvas);
     this.pointer = new PointerController(this);
     this.input = new InputController(this);
@@ -110,6 +179,11 @@ export class Workspace implements EditHost {
     this.filterMenu.onOk = (ci, order, values) => {
       this.history.do(new ApplyAutoFilterCommand(this, ci, order, values));
     };
+    this.cellSelect.onPick = (value) => {
+      this.setCellText(value);
+    };
+    this.noteEditor.onSave = (ri, ci, text) => this.setCellNote(ri, ci, text);
+    this.noteEditor.onDelete = (ri, ci) => this.setCellNote(ri, ci, "");
     this.vbar = new SheetScrollbar(true, {
       viewSize: () => this.root.clientHeight - SCROLLBAR_SIZE,
       contentSize: () => HEADER_HEIGHT + this.sheet().contentHeight(),
@@ -131,8 +205,144 @@ export class Workspace implements EditHost {
     host.append(this.vbar.el, this.hbar.el, corner);
     this.scroll.addEventListener("scroll", this.onScroll);
     window.addEventListener("resize", this.onResize);
+    this.resizeObserver = new ResizeObserver(this.onResize);
+    this.resizeObserver.observe(this.root);
     imageCache.onReady(() => this.render());
+    this.history.onPersist = () => this.onHistoryPersist?.();
+    this.history.onStackChange = () => this.emitUi();
     this.newBlank();
+  }
+
+  commitFormulaBar(): void {
+    if (this.formulaSession) {
+      return;
+    }
+    this.formulaBarCommit?.();
+  }
+
+  isFormulaEditing(): boolean {
+    return !!this.formulaSession;
+  }
+
+  formulaPaintRefs(): FormulaRef[] {
+    const session = this.formulaSession;
+    if (!session || !isFormulaText(session.text)) {
+      return [];
+    }
+    return scanFormulaRefs(session.text, this.sheet().name);
+  }
+
+  beginFormulaEdit(source: FormulaEditState["source"], text: string, cursor: number, mode: FormulaEditState["mode"]): void {
+    if (this.formulaSession && this.formulaSession.source === source) {
+      this.formulaSession = { ...this.formulaSession, text, cursor };
+      this.render();
+      return;
+    }
+    this.clipboard.clear();
+    this.formulaSession = {
+      source,
+      mode,
+      anchorRi: this.selection.ri,
+      anchorCi: this.selection.ci,
+      text,
+      cursor,
+      activeStart: undefined,
+    };
+    this.render();
+    this.emitUi();
+  }
+
+  updateFormulaEdit(text: string, cursor: number): void {
+    if (!this.formulaSession) {
+      if (isFormulaText(text)) {
+        this.beginFormulaEdit(this.editing ? "cell" : "bar", text, cursor, this.editing ? "point" : "edit");
+      }
+      return;
+    }
+    const refs = scanFormulaRefs(text, this.sheet().name);
+    const inside = refs.find((ref) => cursor >= ref.start && cursor <= ref.end);
+    this.formulaSession = {
+      ...this.formulaSession,
+      text,
+      cursor,
+      activeStart: inside?.start,
+    };
+    if (!isFormulaText(text)) {
+      this.formulaSession = null;
+    }
+    this.render();
+  }
+
+  toggleFormulaMode(): void {
+    if (!this.formulaSession) {
+      return;
+    }
+    this.formulaSession = {
+      ...this.formulaSession,
+      mode: this.formulaSession.mode === "point" ? "edit" : "point",
+    };
+  }
+
+  applyFormulaPoint(sri: number, sci: number, eri: number, eci: number): void {
+    if (!this.formulaSession) {
+      return;
+    }
+    this.formulaSession = applyPointRef(this.formulaSession, new CellRange(sri, sci, eri, eci), this.sheet().name);
+    this.writeFormulaSession();
+    this.render();
+    this.emitUi();
+  }
+
+  nudgeFormulaPoint(dri: number, dci: number, extend: boolean): boolean {
+    const session = this.formulaSession;
+    if (!session || session.mode !== "point") {
+      return false;
+    }
+    const refs = scanFormulaRefs(session.text, this.sheet().name);
+    const current = refs.find((ref) => session.activeStart === ref.start) ?? refs.find((ref) => session.cursor >= ref.start && session.cursor <= ref.end);
+    const base = current?.range ?? CellRange.cell(session.anchorRi, session.anchorCi);
+    this.formulaSession = applyPointRef(session, nudgeFormulaRange(base, dri, dci, extend), this.sheet().name);
+    this.writeFormulaSession();
+    this.render();
+    this.emitUi();
+    return true;
+  }
+
+  rewriteFormulaSpan(index: number, range: CellRange): void {
+    const session = this.formulaSession;
+    if (!session) {
+      return;
+    }
+    const refs = scanFormulaRefs(session.text, this.sheet().name);
+    const ref = refs[index];
+    if (!ref) {
+      return;
+    }
+    const next = rewriteFormulaRef(session.text, ref, range);
+    this.formulaSession = { ...session, text: next.text, cursor: next.cursor, activeStart: ref.start, mode: "point" };
+    this.writeFormulaSession();
+    this.render();
+    this.emitUi();
+  }
+
+  endFormulaEdit(): void {
+    this.formulaSession = null;
+    this.render();
+  }
+
+  private writeFormulaSession(): void {
+    const session = this.formulaSession;
+    if (!session) {
+      return;
+    }
+    if (session.source === "bar" || !this.editing) {
+      this.formulaBarApply?.(session.text, session.cursor);
+    }
+    if (this.editing) {
+      this.editor.value = session.text;
+      this.editor.setSelectionRange(session.cursor, session.cursor);
+      this.placeEditor();
+    }
   }
 
   focusGrid(): void {
@@ -143,20 +353,29 @@ export class Workspace implements EditHost {
     this.scheduleCaptureFocus(false);
   }
 
+  cancelCaptureFocus(): void {
+    window.clearTimeout(this.focusTimer);
+  }
+
+  private isChromeFocused(): boolean {
+    const active = document.activeElement;
+    return (
+      active instanceof HTMLElement
+      && !!active.closest(".ho-sheet-formulabar, .ho-sheet-fx-input, .ho-sheet-addr, .ho-sheet-ribbon, .ho-sheet-tabs, .ho-sheet-statusbar, .ho-sheet-contextmenu, .ho-sheet-sort-filter, .ho-sheet-note-editor, .ho-sheet-find, .ho-sheet-print, .ant-modal")
+    );
+  }
+
   private scheduleCaptureFocus(force: boolean): void {
     if (this.editing) {
       return;
     }
-    if (!force) {
-      const active = document.activeElement;
-      if (active instanceof HTMLElement && active.closest(".ho-sheet-fx-input, .ho-sheet-addr, .ho-sheet-ribbon, .ho-sheet-contextmenu, .ho-sheet-sort-filter")) {
-        return;
-      }
+    if (!force && this.isChromeFocused()) {
+      return;
     }
     this.placeCapture();
     window.clearTimeout(this.focusTimer);
     this.focusTimer = window.setTimeout(() => {
-      if (this.editing) {
+      if (this.editing || this.isChromeFocused()) {
         return;
       }
       this.capture.focus({ preventScroll: true });
@@ -171,10 +390,16 @@ export class Workspace implements EditHost {
     return this.engineInst;
   }
 
+  setCaptionMeta(items: Array<{ label: string; value: string }>): void {
+    this.captionMeta = items;
+    this.emitUi();
+  }
+
   afterChange(): void {
     this.syncSizer();
     this.render();
     this.emitUi();
+    this.emitChange();
     this.focusCapture();
   }
 
@@ -182,15 +407,103 @@ export class Workspace implements EditHost {
     this.uiListeners.push(listener);
   }
 
+  onChange(listener: () => void): void {
+    this.changeListeners.push(listener);
+  }
+
   emitUi(): void {
+    this.menu.setEditControl(this.editControlEnabled());
     for (const listener of this.uiListeners) {
       listener();
     }
   }
 
+  emitChange(): void {
+    for (const listener of this.changeListeners) {
+      listener();
+    }
+  }
+
+  destroy(): void {
+    this.filterMenu.hide();
+    this.findUi.destroy();
+    this.input.detach();
+    this.cellSelect.destroy();
+    this.noteEditor.destroy();
+    this.noteTip.destroy();
+    this.menu.hide();
+    this.scroll.removeEventListener("scroll", this.onScroll);
+    window.removeEventListener("resize", this.onResize);
+    this.resizeObserver.disconnect();
+    window.clearTimeout(this.focusTimer);
+    this.uiListeners.length = 0;
+    this.changeListeners.length = 0;
+    this.root.replaceChildren();
+  }
+
+  isFillLocked(): boolean {
+    return this.workbook.enforceEditLock && !this.templateMode;
+  }
+
+  editControlEnabled(): boolean {
+    return this.templateMode && this.workbook.keepEditables;
+  }
+
+  setEditControlEnabled(on: boolean): void {
+    if (!this.templateMode || this.workbook.keepEditables === on) {
+      return;
+    }
+    this.workbook.keepEditables = on;
+    this.afterChange();
+  }
+
+  canEditCell(ri = this.selection.ri, ci = this.selection.ci): boolean {
+    return !this.isFillLocked() || this.sheet().hasEditable(ri, ci);
+  }
+
+  canEditRange(range = this.selection.range): boolean {
+    if (!this.isFillLocked()) {
+      return true;
+    }
+    const sheet = this.sheet();
+    for (let ri = range.sri; ri <= range.eri; ri += 1) {
+      for (let ci = range.sci; ci <= range.eci; ci += 1) {
+        if (!sheet.hasEditable(ri, ci)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  canEditSelection(): boolean {
+    return this.selection.ranges().every((range) => this.canEditRange(range));
+  }
+
+  canMutateStructure(): boolean {
+    return !this.isFillLocked();
+  }
+
+  private rejectLocked(kind: "cell" | "range" | "structure" = "cell"): boolean {
+    const allowed = kind === "structure"
+      ? this.canMutateStructure()
+      : kind === "range"
+        ? this.canEditSelection()
+        : this.canEditCell();
+    if (allowed) {
+      return false;
+    }
+    this.onLockedEdit?.();
+    return true;
+  }
+
   newBlank(): void {
     this.filterMenu.hide();
+    this.cellSelect.hide();
+    this.noteEditor.hide();
+    this.noteTip.hide();
     this.workbook = Workbook.blank();
+    this.engineInst.attach(this.workbook);
     this.history.clear();
     this.selection.set(0, 0);
     this.selectedImageId = undefined;
@@ -212,6 +525,20 @@ export class Workspace implements EditHost {
     this.replaceWorkbook(await new XlsxReader().read(buffer), caption);
   }
 
+  async applyTemplate(buffer: ArrayBuffer): Promise<{
+    appliedSheets: number;
+    markCount: number;
+    enabled: boolean;
+    clearedLock: boolean;
+  }> {
+    const { XlsxReader } = await import("../../io/xlsx/XlsxReader");
+    const { applyTemplateToWorkbook } = await import("../../io/xlsx/templateLock");
+    const template = await new XlsxReader().read(buffer);
+    const result = applyTemplateToWorkbook(this.workbook, template);
+    this.replaceWorkbook(this.workbook, this.caption);
+    return result;
+  }
+
   async loadFile(file: File): Promise<void> {
     const name = file.name.toLowerCase();
     if (name.endsWith(".xlsx")) {
@@ -223,13 +550,21 @@ export class Workspace implements EditHost {
 
   private replaceWorkbook(book: Workbook, caption: string): void {
     this.workbook = book;
-    this.workbook.sheets.forEach((sheet) => this.engineInst.recalculate(sheet));
+    if (this.templateMode) {
+      book.enforceEditLock = false;
+    }
+    this.engineInst.attach(book);
+    this.engineInst.recalculate(book.active());
     this.history.clear();
     this.selection.set(0, 0, this.sheet());
     this.selectedImageId = undefined;
     this.clipboard.clear();
     this.cancelPaintFormat(false);
+    this.cellSelect.hide();
+    this.noteEditor.hide();
+    this.noteTip.hide();
     this.caption = caption;
+    this.cellBadges.clearAll();
     this.cancelEdit();
     this.scroll.scrollLeft = 0;
     this.scroll.scrollTop = 0;
@@ -240,9 +575,15 @@ export class Workspace implements EditHost {
     return this.writer.write(this.workbook);
   }
 
-  async exportXlsx(): Promise<ArrayBuffer> {
+  async exportXlsx(persistedCheckmarksOnly = false): Promise<ArrayBuffer> {
     const { XlsxWriter } = await import("../../io/xlsx/XlsxWriter");
-    return new XlsxWriter().write(this.workbook);
+    return new XlsxWriter().write(this.workbook, persistedCheckmarksOnly);
+  }
+
+  commitCheckmarks(): void {
+    for (const sheet of this.workbook.sheets) {
+      sheet.commitSessionCheckmarks();
+    }
   }
 
   render(): void {
@@ -257,6 +598,10 @@ export class Workspace implements EditHost {
       this.scroll.scrollTop,
       this.selectedImageId,
       this.clipboardRange() ?? this.paintFormatRange(),
+      this.formulaPaintRefs(),
+      this.fillPreview,
+      !this.editing && !this.isFormulaEditing() && this.selectedImageId === undefined,
+      this.editControlEnabled() || this.workbook.enforceEditLock,
     );
     this.placeEditor();
     this.placeCapture();
@@ -273,9 +618,15 @@ export class Workspace implements EditHost {
   }
 
   setCellText(text: string): void {
+    if (this.rejectLocked()) {
+      return;
+    }
     const { ri, ci } = this.selection;
-    const current = this.sheet().getCell(ri, ci)?.text ?? "";
-    if (current === text) {
+    const cell = this.sheet().getCell(ri, ci);
+    const current = cell?.text ?? "";
+    const fmt = this.sheet().getCellStyle(ri, ci).numFmt;
+    const alreadyApplied = current === text && (typeof cell?.value === "number" || !/^general$/i.test(fmt?.trim() || "General"));
+    if (alreadyApplied) {
       this.afterChange();
       return;
     }
@@ -283,12 +634,26 @@ export class Workspace implements EditHost {
   }
 
   enterEdit(initial?: string): void {
+    if (this.rejectLocked()) {
+      return;
+    }
+    const control = this.sheet().getCellControl(this.selection.ri, this.selection.ci);
+    if (control?.kind === "switch") {
+      this.toggleSwitchCell();
+      return;
+    }
+    if (control?.kind === "dropdown") {
+      this.openCellDropdown();
+      return;
+    }
+    this.clipboard.clear();
     const cell = this.sheet().getCell(this.selection.ri, this.selection.ci);
     this.editing = true;
     this.capture.value = "";
     this.capture.classList.remove("is-ime");
     this.root.classList.add("is-editing");
-    this.editor.value = initial !== undefined ? initial : (cell?.text ?? "");
+    const style = this.sheet().getCellStyle(this.selection.ri, this.selection.ci);
+    this.editor.value = initial !== undefined ? initial : cellEditText(cell, style);
     this.editor.classList.add("is-on");
     this.placeEditor();
     this.editor.focus();
@@ -297,6 +662,11 @@ export class Workspace implements EditHost {
     } else {
       this.editor.select();
     }
+    if (isFormulaText(this.editor.value)) {
+      this.beginFormulaEdit("cell", this.editor.value, this.editor.selectionStart, "point");
+    } else {
+      this.render();
+    }
     this.emitUi();
   }
 
@@ -304,6 +674,7 @@ export class Workspace implements EditHost {
     if (!this.editing) {
       return;
     }
+    this.endFormulaEdit();
     const text = this.editor.value;
     this.editing = false;
     this.editor.classList.remove("is-on");
@@ -325,31 +696,41 @@ export class Workspace implements EditHost {
   }
 
   cancelEdit(): void {
+    this.endFormulaEdit();
     this.editing = false;
     this.editor.classList.remove("is-on");
     this.root.classList.remove("is-editing");
     this.editor.value = "";
-    this.placeEditor();
+    this.render();
     this.emitUi();
     this.focusCapture();
   }
 
   applyFormat(action: FormatAction): void {
-    const range = this.selection.range;
+    if (this.rejectLocked("range")) {
+      return;
+    }
+    const ranges = this.selection.ranges().map((range) => range.clone());
     if (action.type === "clear") {
-      this.history.do(new SetCellStyleCommand(this, range, "clear"));
+      this.history.do(new SetCellStyleCommand(this, ranges, "clear"));
       return;
     }
     const current = this.sheet().getCellStyle(this.selection.ri, this.selection.ci);
     const patch = formatToPatch(action, current);
-    this.history.do(new SetCellStyleCommand(this, range, patch));
+    this.history.do(new SetCellStyleCommand(this, ranges, patch));
   }
 
   applyBorder(mode: BorderMode, color = "#000000"): void {
-    this.history.do(new ApplyBorderCommand(this, this.selection.range.clone(), mode, color));
+    if (this.rejectLocked("range")) {
+      return;
+    }
+    this.history.do(new ApplyBorderCommand(this, this.selection.ranges().map((range) => range.clone()), mode, color));
   }
 
   mergeSelection(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     const range = this.selection.range;
     if (!range.multiple()) {
       return;
@@ -371,7 +752,33 @@ export class Workspace implements EditHost {
     this.printUi.open(this.sheet());
   }
 
+  openFind(tab: "find" | "replace" = "find"): void {
+    this.commitEdit("none");
+    this.findUi.open(tab);
+  }
+
+  findNext(backward = false): void {
+    this.findUi.findNext(backward);
+  }
+
+  revealCell(sheetIndex: number, ri: number, ci: number): void {
+    this.commitEdit("none");
+    if (sheetIndex !== this.workbook.activeIndex) {
+      this.cellSelect.hide();
+      this.workbook.setActive(sheetIndex);
+      this.selectedImageId = undefined;
+      this.cancelPaintFormat(false);
+    }
+    this.selection.set(ri, ci, this.sheet());
+    this.ensureVisible();
+    this.render();
+    this.emitUi();
+  }
+
   insertFunction(name: string): void {
+    if (this.rejectLocked()) {
+      return;
+    }
     const item = FORMULA_ITEMS.find((entry) => entry.name === name);
     if (!item) {
       return;
@@ -414,11 +821,16 @@ export class Workspace implements EditHost {
     if (!sheet.autoFilter.active()) {
       return;
     }
-    const items = sheet.autoFilter.items(ci, (ri, col) => cellDisplay(sheet.getCell(ri, col)));
+    const items = sheet.autoFilter.items(
+      ci,
+      (ri, col) => cellDisplay(sheet.getCell(ri, col), sheet.getCellStyle(ri, col)),
+      (ri, col) => sheet.getCellVerdict(ri, col),
+      (ri, col) => sheet.getCellMark(ri, col),
+    );
     const filter = sheet.autoFilter.getFilter(ci);
     const sort = sheet.autoFilter.getSort(ci);
     this.filterMenu.set(ci, items, filter?.value, sort?.order);
-    const box = sheet.cellBox(sheet.autoFilter.hrange().sri, ci);
+    const box = sheet.filterHeaderBox(sheet.autoFilter.hrange().sri, ci);
     const screen = cellScreenXY(sheet, box.x, box.y, this.scroll.scrollLeft, this.scroll.scrollTop);
     const rect = this.root.getBoundingClientRect();
     this.filterMenu.show(
@@ -428,24 +840,54 @@ export class Workspace implements EditHost {
   }
 
   unmergeSelection(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     this.history.do(new UnmergeCommand(this, this.selection.range));
   }
 
   insertRow(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     this.history.do(new InsertRowCommand(this, this.selection.range.sri, this.selection.range.rowCount()));
   }
 
+  onRequestAppendRows: (() => void) | null = null;
+  onRequestRenameSheet: ((index: number, currentName: string) => void) | null = null;
+  onLockedEdit: (() => void) | null = null;
+
+  appendRowsBelow(count: number): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
+    const n = Math.min(500, Math.max(1, Math.floor(Number(count) || 1)));
+    const index = this.selection.range.eri + 1;
+    this.history.do(new InsertRowCommand(this, index, n));
+    this.selection.set(index, this.selection.ci, this.sheet());
+    this.afterChange();
+  }
+
   insertColumn(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     this.history.do(new InsertColumnCommand(this, this.selection.range.sci, this.selection.range.colCount()));
   }
 
   deleteRow(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     this.history.do(new DeleteRowCommand(this, this.selection.range.sri, this.selection.range.rowCount()));
     this.selection.set(Math.min(this.selection.ri, this.sheet().rows.len - 1), this.selection.ci, this.sheet());
     this.afterChange();
   }
 
   deleteColumn(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     this.history.do(new DeleteColumnCommand(this, this.selection.range.sci, this.selection.range.colCount()));
     this.selection.set(this.selection.ri, Math.min(this.selection.ci, this.sheet().cols.len - 1), this.sheet());
     this.afterChange();
@@ -484,6 +926,9 @@ export class Workspace implements EditHost {
   }
 
   pickImage(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
@@ -524,6 +969,9 @@ export class Workspace implements EditHost {
   }
 
   deleteSelectedImage(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     if (this.selectedImageId === undefined) {
       return;
     }
@@ -581,11 +1029,14 @@ export class Workspace implements EditHost {
   }
 
   clearSelection(): void {
-    this.history.do(new ClearRangeCommand(this, this.selection.range.clone()));
+    if (this.rejectLocked("range")) {
+      return;
+    }
+    this.history.do(new ClearRangeCommand(this, this.selection.ranges().map((range) => range.clone())));
   }
 
   copy(mode: "copy" | "cut" = "copy"): string {
-    const payload = this.clipboard.copy(this.sheet(), this.selection.range, mode);
+    const payload = this.clipboard.copy(this.sheet(), this.selection.ranges(), mode);
     this.render();
     return this.clipboard.toTsv(payload);
   }
@@ -643,6 +1094,9 @@ export class Workspace implements EditHost {
     if (!paint || paint.sheet !== this.sheet()) {
       return;
     }
+    if (this.rejectLocked("range")) {
+      return;
+    }
     const dest = this.selection.range;
     if (dest.sri === paint.range.sri && dest.sci === paint.range.sci && dest.eri === paint.range.eri && dest.eci === paint.range.eci) {
       return;
@@ -664,8 +1118,11 @@ export class Workspace implements EditHost {
   }
 
   cut(): string {
+    if (this.rejectLocked("range")) {
+      return this.copy();
+    }
     const text = this.copy("cut");
-    this.history.do(new ClearRangeCommand(this, this.selection.range.clone()));
+    this.history.do(new ClearRangeCommand(this, this.selection.ranges().map((range) => range.clone())));
     return text;
   }
 
@@ -678,8 +1135,27 @@ export class Workspace implements EditHost {
     const rows = grid.length;
     const cols = Math.max(...grid.map((row) => row.length));
     const range = new CellRange(ri, ci, ri + rows - 1, ci + cols - 1);
+    if (!this.canEditRange(range)) {
+      this.onLockedEdit?.();
+      return;
+    }
     this.history.do(new PasteCommand(this, ri, ci, grid, range));
     this.selection.setRange(ri, ci, range.eri, range.eci, this.sheet());
+  }
+
+  applyFill(source: CellRange, dest: CellRange, axis: FillAxis): void {
+    this.fillPreview = undefined;
+    if (!this.canEditRange(dest)) {
+      this.onLockedEdit?.();
+      this.render();
+      return;
+    }
+    if (source.equals(dest)) {
+      this.render();
+      return;
+    }
+    this.selection.setRange(dest.sri, dest.sci, dest.eri, dest.eci, this.sheet());
+    this.history.do(new FillCommand(this, source.clone(), dest.clone(), axis));
   }
 
   pasteTsv(text: string): void {
@@ -698,6 +1174,9 @@ export class Workspace implements EditHost {
   }
 
   addSheet(): void {
+    if (this.rejectLocked("structure")) {
+      return;
+    }
     this.workbook.addSheet();
     this.selection.set(0, 0);
     this.cancelEdit();
@@ -705,7 +1184,11 @@ export class Workspace implements EditHost {
   }
 
   switchSheet(index: number): void {
+    if (index === this.workbook.activeIndex) {
+      return;
+    }
     this.commitEdit("none");
+    this.cellSelect.hide();
     this.workbook.setActive(index);
     this.selection.set(0, 0, this.sheet());
     this.selectedImageId = undefined;
@@ -713,25 +1196,467 @@ export class Workspace implements EditHost {
     this.afterChange();
   }
 
-  renameSheet(index: number, name: string): void {
-    this.workbook.renameSheet(index, name);
+  renameSheet(index: number, name: string): boolean {
+    if (this.rejectLocked("structure")) {
+      return false;
+    }
+    const prev = this.workbook.sheets[index]?.name ?? "";
+    if (!this.workbook.renameSheet(index, name)) {
+      return false;
+    }
+    const next = this.workbook.sheets[index]?.name ?? name.trim();
+    this.cellBadges.renameSheet(prev, next);
+    this.afterChange();
+    return true;
+  }
+
+  setSelectionPriority(priority: number): void {
+    const next = parsePriorityMark(priority);
+    if (!next) {
+      return;
+    }
+    const allHave = this.selectionMarkOrigins().every((item) => this.sheet().getCellMark(item.ri, item.ci)?.priority === next);
+    this.applySelectionMarks((current) => {
+      const mark = { ...current };
+      if (allHave) {
+        delete mark.priority;
+      } else {
+        mark.priority = next;
+      }
+      return cloneMark(mark);
+    });
+  }
+
+  setSelectionShape(shape: string): void {
+    const next = parseShapeMark(shape);
+    if (!next) {
+      return;
+    }
+    const allHave = this.selectionMarkOrigins().every((item) => this.sheet().getCellMark(item.ri, item.ci)?.shape === next);
+    this.applySelectionMarks((current) => {
+      const mark = { ...current };
+      if (allHave) {
+        delete mark.shape;
+      } else {
+        mark.shape = next;
+      }
+      return cloneMark(mark);
+    });
+  }
+
+  clearSelectionPriority(): void {
+    this.applySelectionMarks((current) => cloneMark({ ...current, priority: undefined }));
+  }
+
+  clearSelectionShape(): void {
+    this.applySelectionMarks((current) => cloneMark({ ...current, shape: undefined }));
+  }
+
+  setSelectionVerdict(verdict: string): void {
+    const next = parseVerdictMark(verdict);
+    if (!next) {
+      return;
+    }
+    const allHave = this.selectionMarkOrigins().every((item) => this.sheet().getCellMark(item.ri, item.ci)?.verdict === next);
+    this.applySelectionMarks((current) => {
+      const mark = { ...current };
+      if (allHave) {
+        delete mark.verdict;
+      } else {
+        mark.verdict = next;
+      }
+      return cloneMark(mark);
+    });
+  }
+
+  clearSelectionVerdict(): void {
+    this.applySelectionMarks((current) => cloneMark({ ...current, verdict: undefined }));
+  }
+
+  unmarkSelection(): void {
+    this.applySelectionMarks(() => undefined);
+  }
+
+  clearSheetMarks(): void {
+    const patches = this.sheet().listCellMarks().map((item) => ({ ri: item.ri, ci: item.ci, mark: undefined }));
+    if (!patches.length) {
+      return;
+    }
+    this.history.do(new SetCellMarksCommand(this, patches));
+  }
+
+  private selectionMarkOrigins(): Array<{ ri: number; ci: number }> {
+    const sheet = this.sheet();
+    const seen = new Set<string>();
+    const origins: Array<{ ri: number; ci: number }> = [];
+    for (const range of this.selection.ranges()) {
+      range.each((ri, ci) => {
+        const origin = sheet.mergeOrigin(ri, ci);
+        const key = `${origin.ri},${origin.ci}`;
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        origins.push(origin);
+      });
+    }
+    return origins;
+  }
+
+  private applySelectionMarks(mutate: (current?: CellMark) => CellMark | undefined): void {
+    const sheet = this.sheet();
+    const patches = this.selectionMarkOrigins().flatMap((item) => {
+      const current = sheet.getCellMark(item.ri, item.ci);
+      const next = mutate(current);
+      if (marksEqual(current, next)) {
+        return [];
+      }
+      return [{ ri: item.ri, ci: item.ci, mark: next }];
+    });
+    if (!patches.length) {
+      return;
+    }
+    this.history.do(new SetCellMarksCommand(this, patches));
+  }
+
+  private uniformSelectionMark(): CellMark | undefined {
+    const origins = this.selectionMarkOrigins();
+    if (!origins.length) {
+      return undefined;
+    }
+    const first = this.sheet().getCellMark(origins[0].ri, origins[0].ci);
+    if (isEmptyMark(first) || !first) {
+      return undefined;
+    }
+    const samePriority = origins.every((item) => this.sheet().getCellMark(item.ri, item.ci)?.priority === first.priority);
+    const sameShape = origins.every((item) => this.sheet().getCellMark(item.ri, item.ci)?.shape === first.shape);
+    const sameVerdict = origins.every((item) => this.sheet().getCellMark(item.ri, item.ci)?.verdict === first.verdict);
+    return cloneMark({
+      priority: samePriority ? first.priority : undefined,
+      shape: sameShape ? first.shape : undefined,
+      verdict: sameVerdict ? first.verdict : undefined,
+    });
+  }
+
+  noteCell(): { ri: number; ci: number } {
+    const origin = this.sheet().mergeOrigin(this.selection.ri, this.selection.ci);
+    return { ri: origin.ri, ci: origin.ci };
+  }
+
+  editNote(): void {
+    if (this.rejectLocked()) {
+      return;
+    }
+    this.noteTip.hide();
+    this.filterMenu.hide();
+    this.cellSelect.hide();
+    const { ri, ci } = this.noteCell();
+    const text = cellNoteText(this.sheet().getCell(ri, ci));
+    const rect = this.root.getBoundingClientRect();
+    const screen = this.cellScreenRect();
+    this.noteEditor.show(ri, ci, text, rect.left + screen.x + screen.width + 6, rect.top + screen.y);
+  }
+
+  private placeNoteEditor(): void {
+    if (!this.noteEditor.open) {
+      return;
+    }
+    const rect = this.root.getBoundingClientRect();
+    const screen = this.cellScreenRect();
+    this.noteEditor.move(rect.left + screen.x + screen.width + 6, rect.top + screen.y);
+  }
+
+  deleteNote(): void {
+    const { ri, ci } = this.noteCell();
+    this.setCellNote(ri, ci, "");
+  }
+
+  setCellNote(ri: number, ci: number, text: string): void {
+    if (this.rejectLocked()) {
+      return;
+    }
+    const current = cellNoteText(this.sheet().getCell(ri, ci));
+    const next = text.trim();
+    if (current === next) {
+      return;
+    }
+    this.history.do(new SetCellNoteCommand(this, ri, ci, next));
+  }
+
+  showNoteTip(ri: number, ci: number, clientX: number, clientY: number): void {
+    if (this.noteEditor.open) {
+      this.noteTip.hide();
+      return;
+    }
+    const origin = this.sheet().mergeOrigin(ri, ci);
+    const text = cellNoteText(this.sheet().getCell(origin.ri, origin.ci));
+    if (!text) {
+      this.noteTip.hide();
+      return;
+    }
+    this.noteTip.show(text, clientX + 12, clientY + 16);
+  }
+
+  hideNoteTip(): void {
+    this.noteTip.hide();
+  }
+
+  setSelectionEditable(editable: boolean): void {
+    if (!this.editControlEnabled()) return;
+    for (const range of this.selection.ranges()) {
+      this.sheet().setRangeEditable(range, editable);
+    }
     this.afterChange();
   }
 
-  deleteActiveSheet(): void {
-    this.workbook.deleteSheet(this.workbook.activeIndex);
-    this.selection.set(0, 0, this.sheet());
+  setSelectionTextEdit(): void {
+    if (!this.editControlEnabled()) return;
+    for (const range of this.selection.ranges()) {
+      this.sheet().setRangeEditable(range, true);
+      this.sheet().setRangeControl(range, undefined);
+    }
     this.afterChange();
+  }
+
+  setSelectionControl(control: CellControl): void {
+    if (!this.editControlEnabled()) return;
+    for (const range of this.selection.ranges()) {
+      this.sheet().setRangeControl(range, control);
+    }
+    this.afterChange();
+  }
+
+  requestDropdownOptions(): void {
+    if (!this.editControlEnabled()) return;
+    const range = this.selection.range.clone();
+    const current = this.sheet().getCellControl(this.selection.ri, this.selection.ci);
+    const options = current?.kind === "dropdown" ? current.options : [];
+    this.onRequestDropdownOptions?.(options, (next) => {
+      this.sheet().setRangeControl(range, { kind: "dropdown", options: next });
+      this.afterChange();
+    });
+  }
+
+  toggleSwitchCell(): void {
+    if (this.rejectLocked()) {
+      return;
+    }
+    const { ri, ci } = this.selection;
+    const sheet = this.sheet();
+    if (sheet.getCellControl(ri, ci)?.kind !== "switch") {
+      return;
+    }
+    const style = sheet.getCellStyle(ri, ci);
+    const on = isSwitchOn(cellEditText(sheet.getCell(ri, ci), style));
+    this.setCellText(switchCellText(!on));
+  }
+
+  openCellDropdown(): void {
+    if (this.rejectLocked()) {
+      return;
+    }
+    const { ri, ci } = this.selection;
+    const sheet = this.sheet();
+    const control = sheet.getCellControl(ri, ci);
+    if (control?.kind !== "dropdown") {
+      return;
+    }
+    const style = sheet.getCellStyle(ri, ci);
+    const current = cellEditText(sheet.getCell(ri, ci), style);
+    this.cellSelect.set(control.options, current);
+    const box = sheet.cellBox(ri, ci);
+    const screen = cellScreenXY(sheet, box.x, box.y, this.scroll.scrollLeft, this.scroll.scrollTop);
+    const rect = this.root.getBoundingClientRect();
+    this.cellSelect.show(rect.left + screen.x, rect.top + screen.y + box.height + 1, box.width);
+  }
+
+  controlHitAt(clientX: number, clientY: number): "dropdown" | "switch" | undefined {
+    const rect = this.scroll.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    const hit = this.hit.hit(this.sheet(), x, y, this.scrollX(), this.scrollY());
+    if (hit?.kind !== "cell") {
+      return undefined;
+    }
+    const control = this.sheet().getCellControl(hit.ri, hit.ci);
+    if (!control) {
+      return undefined;
+    }
+    const box = this.sheet().cellBox(hit.ri, hit.ci);
+    const screen = cellScreenXY(this.sheet(), box.x, box.y, this.scroll.scrollLeft, this.scroll.scrollTop);
+    const localX = x - screen.x;
+    const localY = y - screen.y;
+    if (control.kind === "dropdown" && hitDropdownControl(localX, localY, box.width, box.height)) {
+      return "dropdown";
+    }
+    if (control.kind === "switch" && (hitSwitchControl(localX, localY, box.width, box.height) || !this.templateMode)) {
+      return "switch";
+    }
+    return undefined;
+  }
+
+  markedRanges(): MarkedCellRange[] {
+    const items: MarkedCellRange[] = [];
+    for (const sheet of this.workbook.sheets) {
+      for (const cell of sheet.listCellMarks()) {
+        items.push({
+          sheetName: sheet.name,
+          range: xy2expr(cell.ci, cell.ri),
+          ...(cell.mark.priority ? { priority: cell.mark.priority } : {}),
+          ...(cell.mark.shape ? { shape: cell.mark.shape } : {}),
+          ...(cell.mark.verdict ? { verdict: cell.mark.verdict } : {}),
+        });
+      }
+    }
+    return items;
+  }
+
+  applyCellPatches(items: Array<{
+    sheetName: string;
+    ref: string;
+    text?: string;
+    mark?: { priority?: unknown; shape?: unknown; verdict?: unknown } | null;
+  }>): boolean {
+    if (!items.length) return true;
+    const valueTargets: Array<{ sheet: Sheet; ri: number; ci: number; text: string }> = [];
+    const markPatches: Array<{ sheet: Sheet; ri: number; ci: number; mark?: CellMark }> = [];
+    for (const item of items) {
+      const wanted = item.sheetName.trim();
+      const rawRef = item.ref.trim().toUpperCase();
+      const bang = rawRef.lastIndexOf("!");
+      const ref = bang >= 0 ? rawRef.slice(bang + 1) : rawRef;
+      if (!wanted || !ref) return false;
+      const [ci, ri] = expr2xy(ref);
+      if (ci < 0 || ri < 0 || !Number.isFinite(ci) || !Number.isFinite(ri)) return false;
+      const sheet =
+        this.workbook.sheets.find((entry) => entry.name === wanted)
+        ?? this.workbook.sheets.find((entry) => entry.name.trim() === wanted)
+        ?? (items.every((patch) => patch.sheetName.trim() === wanted) ? this.sheet() : undefined);
+      if (!sheet) return false;
+      if (item.mark !== undefined) {
+        const origin = sheet.mergeOrigin(ri, ci);
+        markPatches.push({
+          sheet,
+          ri: origin.ri,
+          ci: origin.ci,
+          mark: cloneMark({
+            priority: parsePriorityMark(item.mark?.priority),
+            shape: parseShapeMark(item.mark?.shape),
+            verdict: parseVerdictMark(item.mark?.verdict),
+          }),
+        });
+        continue;
+      }
+      // Agent 补丁只同步服务端已写入的值，不受模版填报锁限制；锁失败会整表重载。
+      valueTargets.push({ sheet, ri, ci, text: item.text ?? "" });
+    }
+    if (valueTargets.length) {
+      this.history.do(new ApplyCellPatchesCommand(this, valueTargets));
+    }
+    if (markPatches.length) {
+      this.history.do(new SetCellMarksCommand(this, markPatches, { persistOnHistory: true }));
+    }
+    const first = valueTargets[0] ?? markPatches[0];
+    if (first) {
+      const index = this.workbook.sheets.indexOf(first.sheet);
+      if (index >= 0 && index !== this.workbook.activeIndex) {
+        this.workbook.setActive(index);
+      }
+      this.selection.set(first.ri, first.ci, first.sheet);
+      this.ensureVisible();
+    }
+    this.render();
+    this.emitUi();
+    return true;
+  }
+
+  applyReconcileBadges(items: ReconcileBadge[]): void {
+    const bySheet = new Map<string, Array<{ ri: number; ci: number }>>();
+    for (const item of items) {
+      const sheetName = item.sheetName.trim();
+      const ref = item.ref.trim().toUpperCase();
+      if (!sheetName || !ref) continue;
+      const [ci, ri] = expr2xy(ref);
+      if (ci < 0 || ri < 0 || !Number.isFinite(ci) || !Number.isFinite(ri)) continue;
+      const list = bySheet.get(sheetName) ?? [];
+      list.push({ ri, ci });
+      bySheet.set(sheetName, list);
+    }
+    for (const [sheetName, cells] of bySheet) {
+      const wanted = sheetName.trim();
+      const sheet =
+        this.workbook.sheets.find((item) => item.name === wanted)
+        ?? this.workbook.sheets.find((item) => item.name.trim() === wanted)
+        ?? (bySheet.size === 1 ? this.sheet() : undefined);
+      sheet?.setSessionCheckmarks(cells);
+    }
+    this.cellBadges.setChecks(items);
+    this.sheet().refreshFilterView();
+    this.render();
+  }
+
+  listSheetNames(): string[] {
+    return this.workbook.sheets.map((sheet) => sheet.name).filter((name) => name !== CHECKMARKS_SHEET && name !== CELL_MARKS_SHEET);
+  }
+
+  getSheetHeaders(sheetName?: string): string[] {
+    const wanted = sheetName?.trim();
+    const sheet = (wanted ? this.workbook.sheets.find((item) => item.name === wanted) : undefined) ?? this.sheet();
+    const headers: string[] = [];
+    const seen = new Set<string>();
+    for (let ci = 0; ci < sheet.cols.len; ci += 1) {
+      const text = cellDisplay(sheet.getCell(0, ci), sheet.getCellStyle(0, ci)).replace(/\s+/g, " ").trim();
+      const key = text.replace(/\s+/g, "");
+      if (!text || seen.has(key)) continue;
+      seen.add(key);
+      headers.push(text);
+    }
+    return headers;
+  }
+
+  deleteSheet(index: number): boolean {
+    if (this.rejectLocked("structure")) {
+      return false;
+    }
+    if (this.workbook.sheets.length <= 1) {
+      return false;
+    }
+    this.commitEdit("none");
+    this.workbook.deleteSheet(index);
+    this.selection.set(0, 0, this.sheet());
+    this.selectedImageId = undefined;
+    this.cancelPaintFormat(false);
+    this.afterChange();
+    return true;
+  }
+
+  deleteActiveSheet(): void {
+    this.deleteSheet(this.workbook.activeIndex);
+  }
+
+  moveSheet(from: number, to: number): boolean {
+    if (this.rejectLocked("structure")) {
+      return false;
+    }
+    if (!this.workbook.moveSheet(from, to)) {
+      return false;
+    }
+    this.afterChange();
+    return true;
   }
 
   formatState(): FormatState {
     const style = this.sheet().getCellStyle(this.selection.ri, this.selection.ci);
     const cell = this.sheet().getCell(this.selection.ri, this.selection.ci);
+    const uniformMark = this.uniformSelectionMark();
+    const origins = this.selectionMarkOrigins();
     return {
       caption: this.caption,
+      captionMeta: this.captionMeta,
       address: xy2expr(this.selection.ci, this.selection.ri),
-      formula: this.editing ? this.editor.value : (cell?.text ?? ""),
-      display: cellDisplay(cell),
+      formula: this.formulaSession?.text ?? (this.editing ? this.editor.value : cellEditText(cell, style)),
+      display: cellDisplay(cell, style),
+      numFmt: style.numFmt ?? "General",
       fontFamily: style.font?.name ?? DEFAULT_STYLE.font.name ?? "Arial",
       fontSizePt: style.font?.size ?? 10,
       bold: !!style.font?.bold,
@@ -740,7 +1665,7 @@ export class Workspace implements EditHost {
       strike: !!style.strike,
       color: style.color ?? DEFAULT_STYLE.color,
       bgcolor: style.bgcolor ?? DEFAULT_STYLE.bgcolor,
-      align: style.align ?? "left",
+      align: this.sheet().cellAlign(this.selection.ri, this.selection.ci),
       valign: style.valign ?? "middle",
       textwrap: !!style.textwrap,
       canUndo: this.history.canUndo(),
@@ -751,6 +1676,18 @@ export class Workspace implements EditHost {
       autoFilter: this.sheet().autoFilter.active(),
       freeze: this.sheet().freezeIsActive(),
       paintFormat: !!this.paintFormat,
+      selectionPriority: uniformMark?.priority,
+      selectionShape: uniformMark?.shape,
+      selectionVerdict: uniformMark?.verdict,
+      selectionMarked: origins.some((item) => !isEmptyMark(this.sheet().getCellMark(item.ri, item.ci))),
+      selectionHasNote: !!cellNoteText(this.sheet().getCell(this.selection.ri, this.selection.ci)),
+      markCount: this.workbook.sheets.reduce((total, sheet) => total + sheet.listCellMarks().length, 0),
+      templateLocked: this.isFillLocked(),
+      templateMode: this.templateMode,
+      editControl: this.editControlEnabled(),
+      selectionEditable: this.sheet().hasEditable(this.selection.ri, this.selection.ci),
+      cellEditable: this.canEditCell(),
+      cellControl: this.sheet().getCellControl(this.selection.ri, this.selection.ci)?.kind,
     };
   }
 
@@ -810,8 +1747,52 @@ export class Workspace implements EditHost {
     const rect = this.cellScreenRect();
     this.editor.style.left = `${rect.x}px`;
     this.editor.style.top = `${rect.y}px`;
-    this.editor.style.width = `${Math.max(rect.width, 40)}px`;
-    this.editor.style.height = `${Math.max(rect.height, 20)}px`;
+    const style = this.sheet().getCellStyle(this.selection.ri, this.selection.ci);
+    this.editor.style.font = styleFontCss(style);
+    this.editor.style.color = style.color ?? DEFAULT_STYLE.color;
+    this.editor.style.textAlign = this.sheet().cellAlign(this.selection.ri, this.selection.ci);
+    const markReserve = cellMarkBadgeReserve(
+      rect.width,
+      rect.height,
+      this.sheet().displayCellMark(this.selection.ri, this.selection.ci),
+    );
+    this.editor.style.paddingRight = `${Math.max(4, markReserve)}px`;
+    const wrapping = !!style.textwrap || hasExplicitBreak(this.editor.value);
+    this.editor.classList.toggle("is-wrap", wrapping);
+    this.editor.wrap = wrapping ? "soft" : "off";
+    const available = Math.max(rect.width, this.root.clientWidth - rect.x - 8);
+    const textWidth = this.measureEditorTextWidth(this.editor.value);
+    const lineHeight = Number.parseFloat(getComputedStyle(this.editor).lineHeight) || 16;
+    const sized = {
+      cellWidth: rect.width,
+      cellHeight: rect.height,
+      textWidth,
+      available,
+      wrap: wrapping,
+      lineHeight,
+    };
+    const { width } = editorBoxSize({ ...sized, lineCount: 1 });
+    const lines = wrapping
+      ? wrapLines(
+        { measureText: (text) => editorMeasure.measureText(text || " ").width },
+        this.editor.value,
+        Math.max(1, width - 12),
+        !!style.textwrap,
+      ).length
+      : 1;
+    const { height } = editorBoxSize({ ...sized, lineCount: lines });
+    this.editor.style.width = `${width}px`;
+    this.editor.style.height = `${height}px`;
+  }
+
+  private measureEditorTextWidth(text: string): number {
+    const style = getComputedStyle(this.editor);
+    editorMeasure.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    let max = 0;
+    for (const line of text.split("\n")) {
+      max = Math.max(max, editorMeasure.measureText(line || " ").width);
+    }
+    return max;
   }
 
   private syncSizer(): void {
@@ -822,6 +1803,11 @@ export class Workspace implements EditHost {
 
   private onScroll = (): void => {
     this.filterMenu.hide();
+    this.cellSelect.hide();
+    this.noteTip.hide();
+    if (this.noteEditor.open) {
+      this.placeNoteEditor();
+    }
     if (this.editing) {
       this.placeEditor();
     }
@@ -832,7 +1818,7 @@ export class Workspace implements EditHost {
     this.render();
   };
 
-  private onMenu(action: MenuAction): void {
+  private onMenu(action: MenuAction, value?: string): void {
     if (action === "copy") {
       void navigator.clipboard.writeText(this.copy());
     } else if (action === "cut") {
@@ -841,8 +1827,19 @@ export class Workspace implements EditHost {
       this.pasteInternal();
     } else if (action === "clear") {
       this.clearSelection();
+    } else if (action === "find") {
+      this.openFind("find");
     } else if (action === "insert-row") {
       this.insertRow();
+    } else if (action === "append-row") {
+      if (this.rejectLocked("structure")) {
+        return;
+      }
+      if (this.onRequestAppendRows) {
+        this.onRequestAppendRows();
+      } else {
+        this.appendRowsBelow(1);
+      }
     } else if (action === "insert-col") {
       this.insertColumn();
     } else if (action === "delete-row") {
@@ -861,15 +1858,48 @@ export class Workspace implements EditHost {
       this.toggleAutoFilter();
     } else if (action === "freeze") {
       this.toggleFreeze();
+    } else if (action === "set-priority") {
+      const priority = parsePriorityMark(value);
+      if (priority) {
+        this.setSelectionPriority(priority);
+      }
+    } else if (action === "set-shape") {
+      const shape = parseShapeMark(value);
+      if (shape) {
+        this.setSelectionShape(shape);
+      }
+    } else if (action === "set-verdict") {
+      const verdict = parseVerdictMark(value);
+      if (verdict) {
+        this.setSelectionVerdict(verdict);
+      }
+    } else if (action === "unmark") {
+      this.unmarkSelection();
+    } else if (action === "unmark-sheet") {
+      this.clearSheetMarks();
+    } else if (action === "edit-note") {
+      this.editNote();
+    } else if (action === "delete-note") {
+      this.deleteNote();
+    } else if (action === "allow-edit" || action === "control-text") {
+      this.setSelectionTextEdit();
+    } else if (action === "control-dropdown") {
+      this.requestDropdownOptions();
+    } else if (action === "control-switch") {
+      this.setSelectionControl({ kind: "switch" });
+    } else if (action === "deny-edit") {
+      this.setSelectionEditable(false);
     }
   }
 }
 
 export interface FormatState {
   caption: string;
+  captionMeta: Array<{ label: string; value: string }>;
   address: string;
   formula: string;
   display: string;
+  numFmt: string;
   fontFamily: string;
   fontSizePt: number;
   bold: boolean;
@@ -884,11 +1914,23 @@ export interface FormatState {
   canUndo: boolean;
   canRedo: boolean;
   merged: boolean;
-      sheetNames: string[];
+  sheetNames: string[];
   activeSheet: number;
   autoFilter: boolean;
   freeze: boolean;
   paintFormat: boolean;
+  selectionPriority?: CellPriorityMark;
+  selectionShape?: CellShapeMark;
+  selectionVerdict?: CellVerdictMark;
+  selectionMarked: boolean;
+  selectionHasNote: boolean;
+  markCount: number;
+  templateLocked: boolean;
+  templateMode: boolean;
+  editControl: boolean;
+  selectionEditable: boolean;
+  cellEditable: boolean;
+  cellControl?: "dropdown" | "switch";
 }
 
 function readFileDataUrl(file: File): Promise<string> {
@@ -943,6 +1985,16 @@ function formatToPatch(action: FormatAction, current: CellStyle): CellStyle {
   if (action.type === "fontSizePt") {
     return { font: { size: action.value } };
   }
+  if (action.type === "numFmt") {
+    return { numFmt: action.value, ...numericFormatAlign(action.value) };
+  }
+  if (action.type === "decimal") {
+    return { numFmt: bumpDecimalPlaces(current.numFmt, action.value) };
+  }
   return {};
+}
+
+function numericFormatAlign(code: string): Pick<CellStyle, "align"> {
+  return isNumericDisplayFormat(code) ? { align: "right" } : {};
 }
 

@@ -40,15 +40,38 @@ export class CellNavigator {
     return ci;
   }
 
+  static step(sheet: Sheet, ri: number, ci: number, dri: number, dci: number): { ri: number; ci: number } {
+    const merge = sheet.merges.getFirstIncludes(ri, ci);
+    let nextRi = ri + dri;
+    let nextCi = ci + dci;
+    if (merge) {
+      if (dri > 0) {
+        nextRi = Math.max(nextRi, merge.eri + 1);
+      } else if (dri < 0) {
+        nextRi = Math.min(nextRi, merge.sri - 1);
+      }
+      if (dci > 0) {
+        nextCi = Math.max(nextCi, merge.eci + 1);
+      } else if (dci < 0) {
+        nextCi = Math.min(nextCi, merge.sci - 1);
+      }
+    }
+    return {
+      ri: clamp(nextRi, 0, sheet.rows.len - 1),
+      ci: clamp(nextCi, 0, sheet.cols.len - 1),
+    };
+  }
+
   static edge(sheet: Sheet, ri: number, ci: number, dri: number, dci: number): { ri: number; ci: number } {
     const maxR = sheet.rows.len - 1;
     const maxC = sheet.cols.len - 1;
     const startFilled = CellNavigator.hasContent(sheet, ri, ci);
-    let r = ri + dri;
-    let c = ci + dci;
-    if (r < 0 || r > maxR || c < 0 || c > maxC) {
-      return { ri, ci };
+    const first = CellNavigator.step(sheet, ri, ci, dri, dci);
+    if (first.ri === ri && first.ci === ci) {
+      return origin(sheet, ri, ci);
     }
+    let r = first.ri;
+    let c = first.ci;
     if (startFilled && CellNavigator.hasContent(sheet, r, c)) {
       while (inBounds(r + dri, c + dci, maxR, maxC) && CellNavigator.hasContent(sheet, r + dri, c + dci)) {
         r += dri;

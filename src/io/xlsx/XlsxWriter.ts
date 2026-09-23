@@ -1,20 +1,27 @@
 import ExcelJS from "exceljs";
 import { isFormula, type Cell } from "../../model/Cell";
 import type { BorderStyle, CellStyle } from "../../model/CellStyle";
+import { formatPlainNumber, isTextFormat } from "../../model/NumberFormat";
 import type { Sheet } from "../../model/Sheet";
 import type { Workbook } from "../../model/Workbook";
 import { DEFAULT_COL_WIDTH, PT_TO_PX } from "../../shared/constants";
 import { xy2expr } from "../../shared/alphabet";
+import { writeCellMarks } from "./cellMarks";
+import { writeCheckmarks } from "./checkmarks";
+import { writeEditables } from "./editables";
 import { writeExcelImages } from "./imageAnchor";
 
 const COL_CHAR_PX = 8;
 
 export class XlsxWriter {
-  async write(book: Workbook): Promise<ArrayBuffer> {
+  async write(book: Workbook, persistedCheckmarksOnly = false): Promise<ArrayBuffer> {
     const excel = new ExcelJS.Workbook();
     for (const sheet of book.sheets) {
       this.writeSheet(excel, sheet);
     }
+    writeCheckmarks(excel, book, persistedCheckmarksOnly);
+    writeEditables(excel, book);
+    writeCellMarks(excel, book);
     const buffer = await excel.xlsx.writeBuffer();
     return buffer as ArrayBuffer;
   }
@@ -60,17 +67,33 @@ export class XlsxWriter {
 function writeCell(worksheet: ExcelJS.Worksheet, sheet: Sheet, ri: number, ci: number, cell: Cell): void {
   const excelCell = worksheet.getCell(xy2expr(ci, ri));
   const text = cell.text ?? "";
-  if (isFormula(text)) {
+  const style = cell.style === undefined ? undefined : sheet.styles[cell.style];
+  if (isTextFormat(style?.numFmt)) {
+    const literal = text !== ""
+      ? text
+      : typeof cell.value === "number"
+        ? formatPlainNumber(cell.value)
+        : cell.value !== undefined
+          ? String(cell.value)
+          : "";
+    if (literal !== "") {
+      excelCell.value = literal;
+    }
+  } else if (isFormula(text)) {
     excelCell.value = cell.value === undefined
       ? { formula: text.slice(1) }
       : { formula: text.slice(1), result: cell.value };
+  } else if (typeof cell.value === "number" && Number.isFinite(cell.value)) {
+    excelCell.value = cell.value;
   } else if (text !== "") {
     const n = Number(text);
     excelCell.value = Number.isFinite(n) && text.trim() !== "" ? n : text;
   }
-  const style = cell.style === undefined ? undefined : sheet.styles[cell.style];
   if (style) {
     applyStyle(excelCell, style);
+  }
+  if (cell.note?.trim()) {
+    excelCell.note = cell.note;
   }
 }
 
@@ -102,6 +125,9 @@ function applyStyle(excelCell: ExcelJS.Cell, style: CellStyle): void {
       pattern: "solid",
       fgColor: { argb: cssToArgb(style.bgcolor) },
     };
+  }
+  if (style.numFmt && !/^general$/i.test(style.numFmt.trim())) {
+    excelCell.numFmt = style.numFmt;
   }
 }
 

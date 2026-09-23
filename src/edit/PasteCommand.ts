@@ -1,5 +1,7 @@
 import { cloneCell, type Cell } from "../model/Cell";
 import type { CellRange } from "../model/CellRange";
+import { parseTypedInput, writeParsedInput } from "../model/InputParse";
+import { originsFromRange } from "./ClearRangeCommand";
 import type { EditCommand } from "./EditCommand";
 import type { EditHost } from "./EditHost";
 
@@ -20,16 +22,26 @@ export class PasteCommand implements EditCommand {
     for (let r = 0; r < this.grid.length; r += 1) {
       const row = this.grid[r];
       for (let c = 0; c < row.length; c += 1) {
-        sheet.rows.setCell(this.originRi + r, this.originCi + c, cloneCell(row[c]));
+        const ri = this.originRi + r;
+        const ci = this.originCi + c;
+        const incoming = row[c];
+        if (incoming && incoming.style === undefined && incoming.value === undefined && incoming.text) {
+          const parsed = parseTypedInput(incoming.text, sheet.getCellStyle(ri, ci).numFmt);
+          writeParsedInput(sheet, ri, ci, parsed);
+        } else {
+          sheet.rows.setCell(ri, ci, cloneCell(incoming));
+        }
       }
     }
-    this.host.engine().recalculate(sheet);
+    sheet.growRowsToFit(this.range);
+    this.host.engine().recalculateAt(originsFromRange(sheet, this.range));
     this.host.afterChange();
   }
 
   undo(): void {
-    this.host.sheet().restoreCells(this.before);
-    this.host.engine().recalculate(this.host.sheet());
+    const sheet = this.host.sheet();
+    sheet.restoreCells(this.before);
+    this.host.engine().recalculateAt(originsFromRange(sheet, this.range));
     this.host.afterChange();
   }
 }

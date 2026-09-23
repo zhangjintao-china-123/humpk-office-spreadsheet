@@ -1,4 +1,5 @@
 import {
+  CELL_PAD,
   DEFAULT_COL_LEN,
   DEFAULT_COL_WIDTH,
   DEFAULT_ROW_HEIGHT,
@@ -6,7 +7,9 @@ import {
   HEADER_HEIGHT,
   INDEX_WIDTH,
 } from "../shared/constants";
-import { type Cell, cellDisplay, cloneCell } from "./Cell";
+import { type Cell, cellDisplay, cloneCell, effectiveAlign, materializeTextFormat } from "./Cell";
+import { isTextFormat } from "./NumberFormat";
+import { hasExplicitBreak, measurerForStyle, wrapLines, wrappedBlockHeight } from "../render/textLayout";
 import { imageRect } from "./SheetImage";
 import { CellRange } from "./CellRange";
 import {
@@ -15,10 +18,13 @@ import {
   mergeStyle,
   resolveStyle,
   stylesEqual,
+  type Align,
   type BorderStyle,
   type CellStyle,
 } from "./CellStyle";
-import { AutoFilter, type AutoFilterJson } from "./AutoFilter";
+import { AutoFilter, skipFilterBannerRows, type AutoFilterJson, type FilterVerdict } from "./AutoFilter";
+import { cloneCellControl, type CellControl } from "./CellControl";
+import { cloneMark, isEmptyMark, type CellMark, type CellVerdictMark } from "./CellMarks";
 import { Cols } from "./Cols";
 import { Merges } from "./Merges";
 import { Rows } from "./Rows";
@@ -26,6 +32,8 @@ import { SheetImages } from "./SheetImages";
 
 export class Sheet {
   name: string;
+  table?: string;
+  filters?: Record<string, string | number>;
   styles: CellStyle[] = [];
   merges = new Merges();
   images = new SheetImages();
@@ -34,6 +42,11 @@ export class Sheet {
   freeze: [number, number] = [0, 0];
   rows: Rows;
   cols: Cols;
+  private persistedCheckmarks = new Set<string>();
+  private sessionCheckmarks = new Set<string>();
+  private editableCells = new Set<string>();
+  private cellControls = new Map<string, CellControl>();
+  private cellMarks = new Map<string, CellMark>();
 
   constructor(name: string, rowLen = DEFAULT_ROW_LEN, colLen = DEFAULT_COL_LEN) {
     this.name = name;
@@ -48,6 +61,10 @@ export class Sheet {
   getCellStyle(ri: number, ci: number): CellStyle {
     const index = this.getCell(ri, ci)?.style;
     return resolveStyle(index === undefined ? undefined : this.styles[index]);
+  }
+
+  cellAlign(ri: number, ci: number): Align {
+    return effectiveAlign(this.getCell(ri, ci), this.rawStyle(ri, ci), this.getCellStyle(ri, ci));
   }
 
   rawStyle(ri: number, ci: number): CellStyle {
@@ -81,12 +98,19 @@ export class Sheet {
 
   applyStylePatch(range: CellRange, patch: CellStyle): Map<string, Cell | undefined> {
     const before = this.snapshotCells(range);
+    const toText = isTextFormat(patch.numFmt);
     range.each((ri, ci) => {
       const current = this.getCellStyle(ri, ci);
       const next = mergeStyle(current, patch);
       const cell = this.rows.getCellOrNew(ri, ci);
       cell.style = this.addStyle(next);
+      if (toText && !isTextFormat(current.numFmt)) {
+        materializeTextFormat(cell);
+      }
     });
+    if (patch.textwrap) {
+      this.growRowsToFit(range);
+    }
     return before;
   }
 
@@ -153,8 +177,222 @@ export class Sheet {
     return this.autoFilter.hiddenRows.has(ri);
   }
 
+  hasCheckmark(ri: number, ci: number): boolean {
+    return this.getCellVerdict(ri, ci) === "pass";
+  }
+
+  getCellVerdict(ri: number, ci: number): FilterVerdict {
+    const mark = this.getCellMark(ri, ci);
+    if (mark?.verdict === "pass" || mark?.verdict === "fail") {
+      return mark.verdict;
+    }
+    const key = checkmarkKey(ri, ci);
+    if (this.persistedCheckmarks.has(key) || this.sessionCheckmarks.has(key)) {
+      return "pass";
+    }
+    return "none";
+  }
+
+  setCheckmarks(cells: Array<{ ri: number; ci: number }>): void {
+    this.sessionCheckmarks.clear();
+    this.mergeVerdict("pass", cells, false);
+    this.persistedCheckmarks = toCheckmarkSet(cells.filter((cell) => this.getCellVerdict(cell.ri, cell.ci) === "pass"));
+  }
+
+  setSessionCheckmarks(cells: Array<{ ri: number; ci: number }>): void {
+    this.clearVerdict("pass");
+    this.sessionCheckmarks = toCheckmarkSet(cells);
+    this.persistedCheckmarks.clear();
+    this.mergeVerdict("pass", cells, true);
+  }
+
+  listCheckmarks(): Array<{ ri: number; ci: number }> {
+    return this.listVerdictCells("pass");
+  }
+
+  listPersistedCheckmarks(): Array<{ ri: number; ci: number }> {
+    const keys = new Set(this.persistedCheckmarks);
+    for (const item of this.listCellMarks()) {
+      const key = checkmarkKey(item.ri, item.ci);
+      if (item.mark.verdict === "pass" && !this.sessionCheckmarks.has(key)) {
+        keys.add(key);
+      } else if (item.mark.verdict) {
+        keys.delete(key);
+      }
+    }
+    return keysToCheckmarks(keys);
+  }
+
+  commitSessionCheckmarks(): void {
+    for (const key of this.sessionCheckmarks) {
+      this.persistedCheckmarks.add(key);
+    }
+    this.sessionCheckmarks.clear();
+  }
+
+  private mergeVerdict(verdict: CellVerdictMark, cells: Array<{ ri: number; ci: number }>, overwrite: boolean): void {
+    for (const cell of cells) {
+      if (cell.ri < 0 || cell.ci < 0) {
+        continue;
+      }
+      const current = this.getCellMark(cell.ri, cell.ci) ?? {};
+      if (!overwrite && current.verdict) {
+        continue;
+      }
+      this.setCellMark(cell.ri, cell.ci, { ...current, verdict });
+    }
+  }
+
+  private clearVerdict(verdict: CellVerdictMark): void {
+    for (const item of this.listCellMarks()) {
+      if (item.mark.verdict === verdict) {
+        this.setCellMark(item.ri, item.ci, { ...item.mark, verdict: undefined });
+      }
+    }
+  }
+
+  private listVerdictCells(verdict: CellVerdictMark): Array<{ ri: number; ci: number }> {
+    const keys = new Set<string>();
+    if (verdict === "pass") {
+      for (const key of this.persistedCheckmarks) keys.add(key);
+      for (const key of this.sessionCheckmarks) keys.add(key);
+    }
+    for (const item of this.listCellMarks()) {
+      const key = checkmarkKey(item.ri, item.ci);
+      if (item.mark.verdict === verdict) {
+        keys.add(key);
+      } else if (verdict === "pass" && item.mark.verdict) {
+        keys.delete(key);
+      }
+    }
+    return keysToCheckmarks(keys);
+  }
+
+  hasEditable(ri: number, ci: number): boolean {
+    return this.editableCells.has(checkmarkKey(ri, ci));
+  }
+
+  setEditableCells(cells: Array<{ ri: number; ci: number }>): void {
+    this.editableCells = toCheckmarkSet(cells);
+  }
+
+  listEditableCells(): Array<{ ri: number; ci: number }> {
+    return keysToCheckmarks(this.editableCells);
+  }
+
+  setCellEditable(ri: number, ci: number, editable: boolean): void {
+    const key = checkmarkKey(ri, ci);
+    if (editable) {
+      this.editableCells.add(key);
+    } else {
+      this.editableCells.delete(key);
+      this.cellControls.delete(key);
+    }
+  }
+
+  setRangeEditable(range: { sri: number; sci: number; eri: number; eci: number }, editable: boolean): void {
+    for (let ri = range.sri; ri <= range.eri; ri += 1) {
+      for (let ci = range.sci; ci <= range.eci; ci += 1) {
+        this.setCellEditable(ri, ci, editable);
+      }
+    }
+  }
+
+  getCellMark(ri: number, ci: number): CellMark | undefined {
+    return cloneMark(this.cellMarks.get(checkmarkKey(ri, ci)));
+  }
+
+  displayCellMark(ri: number, ci: number): CellMark | undefined {
+    const verdict = this.getCellVerdict(ri, ci);
+    return cloneMark({
+      ...this.getCellMark(ri, ci),
+      ...(verdict === "none" ? {} : { verdict }),
+    });
+  }
+
+  setCellMark(ri: number, ci: number, mark?: CellMark): void {
+    const key = checkmarkKey(ri, ci);
+    const next = cloneMark(mark);
+    if (!next || isEmptyMark(next)) {
+      this.cellMarks.delete(key);
+      this.persistedCheckmarks.delete(key);
+      this.sessionCheckmarks.delete(key);
+      return;
+    }
+    this.cellMarks.set(key, next);
+    if (next.verdict !== "pass") {
+      this.persistedCheckmarks.delete(key);
+      this.sessionCheckmarks.delete(key);
+    }
+  }
+
+  setCellMarks(items: Array<{ ri: number; ci: number; mark?: CellMark }>): void {
+    this.cellMarks.clear();
+    for (const item of items) {
+      this.setCellMark(item.ri, item.ci, item.mark);
+    }
+  }
+
+  listCellMarks(): Array<{ ri: number; ci: number; mark: CellMark }> {
+    return [...this.cellMarks.entries()]
+      .flatMap(([key, mark]) => {
+        const next = cloneMark(mark);
+        if (!next) {
+          return [];
+        }
+        const [ri, ci] = key.split(",").map(Number);
+        return [{ ri, ci, mark: next }];
+      })
+      .sort((a, b) => a.ri - b.ri || a.ci - b.ci);
+  }
+
+  clearCellMarks(): void {
+    this.cellMarks.clear();
+  }
+
+  getCellControl(ri: number, ci: number): CellControl | undefined {
+    return this.cellControls.get(checkmarkKey(ri, ci));
+  }
+
+  setCellControl(ri: number, ci: number, control: CellControl | undefined): void {
+    const key = checkmarkKey(ri, ci);
+    if (!control) {
+      this.cellControls.delete(key);
+      return;
+    }
+    this.editableCells.add(key);
+    this.cellControls.set(key, cloneCellControl(control));
+  }
+
+  setRangeControl(range: { sri: number; sci: number; eri: number; eci: number }, control: CellControl | undefined): void {
+    for (let ri = range.sri; ri <= range.eri; ri += 1) {
+      for (let ci = range.sci; ci <= range.eci; ci += 1) {
+        this.setCellControl(ri, ci, control);
+      }
+    }
+  }
+
+  setCellControls(items: Array<{ ri: number; ci: number; control: CellControl }>): void {
+    this.cellControls.clear();
+    for (const item of items) {
+      this.setCellControl(item.ri, item.ci, item.control);
+    }
+  }
+
+  listCellControls(): Array<{ ri: number; ci: number; control: CellControl }> {
+    return [...this.cellControls.entries()].map(([key, control]) => {
+      const [ri, ci] = key.split(",").map(Number);
+      return { ri, ci, control: cloneCellControl(control) };
+    });
+  }
+
   refreshFilterView(): void {
-    this.autoFilter.apply(this.rows.len, (ri, ci) => cellDisplay(this.getCell(ri, ci)));
+    this.autoFilter.apply(
+      this.rows.len,
+      (ri, ci) => cellDisplay(this.getCell(ri, ci), this.getCellStyle(ri, ci)),
+      (ri, ci) => this.getCellVerdict(ri, ci),
+      (ri, ci) => this.getCellMark(ri, ci),
+    );
   }
 
   captureFilter(): AutoFilterJson {
@@ -164,6 +402,18 @@ export class Sheet {
   restoreFilter(json: AutoFilterJson): void {
     this.autoFilter.setData(json);
     this.refreshFilterView();
+  }
+
+  alignAutoFilterHeader(): void {
+    if (!this.autoFilter.ref) {
+      return;
+    }
+    const next = skipFilterBannerRows(
+      this.autoFilter.range(),
+      (ri, ci) => !!cellDisplay(this.getCell(ri, ci), this.getCellStyle(ri, ci)),
+      (ri, ci) => this.merges.getFirstIncludes(ri, ci),
+    );
+    this.autoFilter.ref = next.toString();
   }
 
   freezeIsActive(): boolean {
@@ -338,6 +588,39 @@ export class Sheet {
     return new CellRange(0, 0, eri, eci);
   }
 
+  growRowsToFit(range: CellRange): void {
+    const needed = new Map<number, number>();
+    range.each((ri, ci) => {
+      const style = this.getCellStyle(ri, ci);
+      const text = cellDisplay(this.getCell(ri, ci), style);
+      if (!text) {
+        return;
+      }
+      const wrap = !!style.textwrap;
+      if (!wrap && !hasExplicitBreak(text)) {
+        return;
+      }
+      const width = Math.max(1, this.cellBox(ri, ci).width - CELL_PAD * 2);
+      const lines = wrapLines(measurerForStyle(style), text, width, wrap);
+      const height = wrappedBlockHeight(lines.length, style);
+      needed.set(ri, Math.max(needed.get(ri) ?? 0, height));
+    });
+    for (const [ri, height] of needed) {
+      if (this.rows.getHeight(ri) < height) {
+        this.rows.setHeight(ri, height);
+      }
+    }
+  }
+
+  filterHeaderBox(ri: number, ci: number): { x: number; y: number; width: number; height: number } {
+    return {
+      x: this.colLeft(ci),
+      y: this.rowTop(ri),
+      width: this.cols.getWidth(ci),
+      height: this.rows.getHeight(ri),
+    };
+  }
+
   cellBox(ri: number, ci: number): { x: number; y: number; width: number; height: number } {
     const merge = this.merges.getFirstIncludes(ri, ci);
     const sri = merge?.sri ?? ri;
@@ -365,4 +648,23 @@ export class Sheet {
 
 function cellOccupied(cell: Cell): boolean {
   return !!(cell.text || cell.value !== undefined || cell.style !== undefined || cell.merge);
+}
+
+function checkmarkKey(ri: number, ci: number): string {
+  return `${ri},${ci}`;
+}
+
+function toCheckmarkSet(cells: Array<{ ri: number; ci: number }>): Set<string> {
+  return new Set(
+    cells
+      .filter((item) => item.ri >= 0 && item.ci >= 0)
+      .map((item) => checkmarkKey(item.ri, item.ci)),
+  );
+}
+
+function keysToCheckmarks(keys: Set<string>): Array<{ ri: number; ci: number }> {
+  return [...keys].map((key) => {
+    const [ri, ci] = key.split(",").map(Number);
+    return { ri, ci };
+  });
 }

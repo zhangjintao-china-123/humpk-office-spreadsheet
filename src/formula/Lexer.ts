@@ -9,6 +9,7 @@ const SINGLE: Record<string, TokenType> = {
   "-": "MINUS",
   "*": "MUL",
   "/": "DIV",
+  "&": "AMP",
 };
 
 export class Lexer {
@@ -26,6 +27,15 @@ export class Lexer {
       }
       if (ch === '"') {
         tokens.push(this.readString());
+        continue;
+      }
+      if (ch === "'") {
+        tokens.push(this.readQuotedSheet());
+        continue;
+      }
+      if (ch === "!") {
+        tokens.push({ type: "BANG", value: "!" });
+        this.i += 1;
         continue;
       }
       if (isDigit(ch) || (ch === "." && isDigit(this.src[this.i + 1] ?? ""))) {
@@ -52,6 +62,26 @@ export class Lexer {
     return tokens;
   }
 
+  private readQuotedSheet(): Token {
+    this.i += 1;
+    let value = "";
+    while (this.i < this.src.length) {
+      const ch = this.src[this.i];
+      if (ch === "'") {
+        if (this.src[this.i + 1] === "'") {
+          value += "'";
+          this.i += 2;
+          continue;
+        }
+        this.i += 1;
+        return { type: "SHEET", value };
+      }
+      value += ch;
+      this.i += 1;
+    }
+    throw new Error("unterminated sheet name");
+  }
+
   private readString(): Token {
     this.i += 1;
     let value = "";
@@ -71,6 +101,14 @@ export class Lexer {
     while (isDigit(this.src[this.i] ?? "") || this.src[this.i] === ".") {
       value += this.src[this.i];
       this.i += 1;
+    }
+    let j = this.i;
+    while (this.src[j] === " " || this.src[j] === "\t") {
+      j += 1;
+    }
+    if (this.src[j] === "%" || this.src[j] === "％") {
+      this.i = j + 1;
+      return { type: "NUMBER", value: String(Number(value) / 100) };
     }
     return { type: "NUMBER", value };
   }
@@ -124,5 +162,5 @@ function isDigit(ch: string): boolean {
 }
 
 function isLetter(ch: string): boolean {
-  return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
+  return /\p{L}/u.test(ch);
 }

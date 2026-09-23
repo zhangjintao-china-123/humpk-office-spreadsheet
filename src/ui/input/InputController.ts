@@ -8,6 +8,7 @@ export class InputController {
   constructor(private readonly workspace: Workspace) {}
 
   attach(host: HTMLElement): void {
+    window.addEventListener("keydown", this.onFindKey, true);
     window.addEventListener("keydown", this.onKey);
     const capture = this.workspace.capture;
     capture.addEventListener("compositionstart", this.onComposeStart);
@@ -16,6 +17,11 @@ export class InputController {
     this.workspace.editor.addEventListener("keydown", this.onEditorKey);
     this.workspace.editor.addEventListener("blur", this.onBlur);
     host.setAttribute("tabindex", "-1");
+  }
+
+  detach(): void {
+    window.removeEventListener("keydown", this.onFindKey, true);
+    window.removeEventListener("keydown", this.onKey);
   }
 
   private onComposeStart = (): void => {
@@ -55,6 +61,13 @@ export class InputController {
     if (event.target === ws.editor || (isField(event.target) && event.target !== ws.capture)) {
       return;
     }
+    if (event.target instanceof HTMLElement && event.target.closest(".ho-sheet-formulabar")) {
+      return;
+    }
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active.closest(".ho-sheet-formulabar")) {
+      return;
+    }
     if (event.isComposing || this.composing) {
       if (event.key === "Escape") {
         this.composing = false;
@@ -65,6 +78,9 @@ export class InputController {
     }
     const meta = event.metaKey || event.ctrlKey;
     const key = event.key;
+    if (this.handleFind(event, meta, key)) {
+      return;
+    }
     if (this.handleMeta(event, meta, key)) {
       return;
     }
@@ -81,6 +97,10 @@ export class InputController {
     }
     if (key === "F2") {
       event.preventDefault();
+      if (event.shiftKey) {
+        ws.editNote();
+        return;
+      }
       ws.enterEdit();
       return;
     }
@@ -89,6 +109,53 @@ export class InputController {
       ws.enterEdit(key);
     }
   };
+
+  private onFindKey = (event: KeyboardEvent): void => {
+    if (!this.shouldHandleFind(event)) {
+      return;
+    }
+    this.handleFind(event, event.metaKey || event.ctrlKey, event.key);
+  };
+
+  private shouldHandleFind(event: KeyboardEvent): boolean {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return true;
+    }
+    if (target.closest(".ho-sheet-find, .ho-sheet-app, .ho-sheet-workspace, .ho-sheet-ribbon, .ho-sheet-formulabar, .so-sheet-host")) {
+      return true;
+    }
+    if (target.closest("input, textarea, select, [contenteditable], .ant-modal")) {
+      return false;
+    }
+    return this.workspace.root.contains(target) || target === document.body;
+  }
+
+  private handleFind(event: KeyboardEvent, meta: boolean, key: string): boolean {
+    if (this.workspace.editing && event.target === this.workspace.editor && !meta && key !== "F3") {
+      return false;
+    }
+    const lower = key.toLowerCase();
+    if (meta && lower === "f") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.workspace.openFind("find");
+      return true;
+    }
+    if (meta && lower === "h") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.workspace.openFind("replace");
+      return true;
+    }
+    if (key === "F3") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.workspace.findNext(event.shiftKey);
+      return true;
+    }
+    return false;
+  }
 
   private handleMeta(event: KeyboardEvent, meta: boolean, key: string): boolean {
     if (!meta) {
@@ -153,6 +220,11 @@ export class InputController {
       ws.printPreview();
       return true;
     }
+    if (lower === "m" && event.shiftKey) {
+      event.preventDefault();
+      ws.unmarkSelection();
+      return true;
+    }
     if (lower === "a") {
       event.preventDefault();
       ws.selectImage(undefined);
@@ -164,7 +236,8 @@ export class InputController {
     if (key === " ") {
       event.preventDefault();
       ws.selectImage(undefined);
-      ws.selection.selectCol(ws.selection.ci, ws.sheet().rows.len);
+      const range = ws.selection.range;
+      ws.selection.selectCols(range.sci, range.eci, ws.sheet().rows.len);
       ws.ensureVisible();
       ws.render();
       ws.emitUi();
@@ -209,7 +282,7 @@ export class InputController {
     }
     if (key === " " && event.shiftKey) {
       event.preventDefault();
-      ws.selection.selectRow(ws.selection.ri, sheet.cols.len);
+      ws.selection.selectRows(ws.selection.range.sri, ws.selection.range.eri, sheet.cols.len);
       ws.render();
       ws.emitUi();
       return true;
@@ -319,6 +392,18 @@ export class InputController {
       ws.render();
       return;
     }
+    if (event.key === "F2") {
+      event.preventDefault();
+      ws.toggleFormulaMode();
+      return;
+    }
+    if (event.key.startsWith("Arrow") && ws.nudgeFormulaPoint(...arrowNudge(event))) {
+      event.preventDefault();
+      return;
+    }
+    if (ws.isFormulaEditing() && event.key.startsWith("Arrow")) {
+      return;
+    }
     if (event.key === "ArrowUp") {
       event.preventDefault();
       ws.commitEdit("up");
@@ -369,6 +454,19 @@ function insertNewline(editor: HTMLTextAreaElement): void {
   editor.selectionStart = editor.selectionEnd = start + 1;
 }
 
+function arrowNudge(event: KeyboardEvent): [number, number, boolean] {
+  if (event.key === "ArrowUp") {
+    return [-1, 0, event.shiftKey];
+  }
+  if (event.key === "ArrowDown") {
+    return [1, 0, event.shiftKey];
+  }
+  if (event.key === "ArrowLeft") {
+    return [0, -1, event.shiftKey];
+  }
+  return [0, 1, event.shiftKey];
+}
+
 function arrowMove(key: string): [number, number] | undefined {
   if (key === "ArrowUp") {
     return [-1, 0];
@@ -389,7 +487,7 @@ function isField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
   }
-  return !!target.closest("input, select, textarea, [contenteditable]");
+  return !!target.closest("input, select, textarea, [contenteditable], .ho-sheet-find, .ho-sheet-print");
 }
 
 async function copyText(text: string): Promise<void> {

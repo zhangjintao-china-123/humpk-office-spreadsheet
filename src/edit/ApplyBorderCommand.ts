@@ -1,25 +1,31 @@
-import { CellRange } from "../model/CellRange";
+import type { CellRange } from "../model/CellRange";
 import type { Cell } from "../model/Cell";
 import type { BorderSide, BorderStyle } from "../model/CellStyle";
 import type { Sheet } from "../model/Sheet";
 import type { BorderMode } from "./FormatAction";
 import type { EditCommand } from "./EditCommand";
 import type { EditHost } from "./EditHost";
+import { asRanges, snapshotRanges } from "./rangeList";
 
 export class ApplyBorderCommand implements EditCommand {
   private before = new Map<string, Cell | undefined>();
+  private readonly ranges: CellRange[];
 
   constructor(
     private readonly host: EditHost,
-    private readonly range: CellRange,
+    range: CellRange | CellRange[],
     private readonly mode: BorderMode,
     private readonly color: string,
-  ) {}
+  ) {
+    this.ranges = asRanges(range);
+  }
 
   do(): void {
     const sheet = this.host.sheet();
-    this.before = sheet.snapshotCells(this.range);
-    applyRangeBorders(sheet, this.range, this.mode, this.color);
+    this.before = snapshotRanges(sheet, this.ranges);
+    for (const range of this.ranges) {
+      applyRangeBorders(sheet, range, this.mode, this.color);
+    }
     this.host.afterChange();
   }
 
